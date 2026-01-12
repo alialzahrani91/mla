@@ -209,12 +209,14 @@ st.title("🧠 AI High Gain Dashboard – TASI Only")
 df = fetch_tasi()
 df = compute_indicators(df)
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📈 +5% اليوم",
     "🔮 تنبؤ الغد (Ensemble)",
     "🧠 التعلم والتقييم",
-    "📊 Dashboard"
+    "📊 Dashboard",
+    "⚡ فرص +2% غدًا (تحليل مباشر)"
 ])
+
 
 # ---------- TAB 1 ----------
 with tab1:
@@ -292,3 +294,64 @@ with tab4:
     col3.metric("حجم التعلم", len(safe_read(TRAIN_FILE)))
 
     st.bar_chart(df["Change %"])
+    # ---------- TAB 5 ----------
+with tab5:
+    st.subheader("⚡ أسهم مرشحة لتحقيق +2% غدًا (بدون تعلم)")
+
+    candidates = df.copy()
+
+    candidates["Score"] = 0
+
+    candidates.loc[
+        (candidates["RSI"] >= 45) & (candidates["RSI"] <= 65),
+        "Score"
+    ] += 1
+
+    candidates.loc[
+        candidates["Price"] > candidates["EMA20"],
+        "Score"
+    ] += 1
+
+    candidates.loc[
+        candidates["EMA20"] > candidates["EMA50"],
+        "Score"
+    ] += 1
+
+    candidates.loc[
+        candidates["MACD"] > 0,
+        "Score"
+    ] += 1
+
+    candidates.loc[
+        candidates["Relative Volume"] >= 1.3,
+        "Score"
+    ] += 1
+
+    candidates.loc[
+        (candidates["Change %"] >= -1) & (candidates["Change %"] <= 3),
+        "Score"
+    ] += 1
+
+    result = candidates[candidates["Score"] >= 3] \
+        .sort_values(["Score", "Relative Volume"], ascending=False)
+
+    if result.empty:
+        st.info("لا توجد فرص قوية حاليًا")
+    else:
+        st.dataframe(
+            result[[
+                "Symbol", "Company", "Price", "Change %",
+                "RSI", "Relative Volume",
+                "EMA20", "EMA50", "MACD", "Score"
+            ]],
+            use_container_width=True
+        )
+
+    st.caption("""
+    🧠 **المنهجية**:
+    - زخم صحي
+    - اتجاه صاعد قصير
+    - حجم تداول داعم
+    - لم يتحرك بقوة بعد
+    """)
+
