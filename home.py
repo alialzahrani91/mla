@@ -14,7 +14,7 @@ PREDICTED_FILE = "predicted.csv"
 TRAINING_FILE = "training_data.csv"
 
 # =============================
-# جلب بيانات السوق من TradingView
+# جلب بيانات السوق من TradingView مع فلترة أسهم تاسي فقط
 # =============================
 @st.cache_data(ttl=300)
 def fetch_tradingview_market(market_code):
@@ -38,8 +38,13 @@ def fetch_tradingview_market(market_code):
     rows = []
     for item in data:
         try:
+            symbol = item["s"]
+            # تصفية أسهم تاسي فقط للسوق السعودي
+            if market_code == "ksa" and not symbol.startswith("TADAWUL:"):
+                continue
+            
             rows.append({
-                "Symbol": item["s"],
+                "Symbol": symbol,
                 "Company": item["d"][1],
                 "Price": float(item["d"][2]),
                 "Change %": float(item["d"][3]),
@@ -115,8 +120,8 @@ def tab_evaluate():
         st.info("لا توجد أسهم للتقييم")
         return pd.DataFrame()
     
-    # التقييم: إذا Change % >=5 اليوم -> تحقق، وإلا فشل
-    df_market = fetch_tradingview_market("ksa")  # مثال للسوق السعودي
+    # جلب السوق الحالي لتقييم الأداء
+    df_market = fetch_tradingview_market("ksa")  # للسوق السعودي، أسهم تاسي فقط
     merged = pd.merge(predicted, df_market[["Symbol","Change %"]], on="Symbol", how="left", suffixes=("","_today"))
     
     merged["Achieved +5%"] = merged["Change %_today"] >= 5
