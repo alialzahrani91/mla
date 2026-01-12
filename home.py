@@ -13,7 +13,7 @@ from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.callbacks import EarlyStopping
 
 # ================== CONFIG ==================
-st.set_page_config("AI High Gain Dashboard – TASI Only", layout="wide")
+st.set_page_config("AI High Gain Dashboard – KSA", layout="wide")
 
 HEADERS = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
 DATA_DIR = "data"
@@ -31,25 +31,6 @@ LSTM_FEATURES = [
 
 TIME_STEPS = 20
 
-# ================== TASI SYMBOLS ==================
-TASI_SYMBOLS = [
-    "1010","1020","1030","1040","1050","1060","1080","1120","1140","1150",
-    "1180","1201","1210","1211","1301","1302","1320","1330","1350",
-    "2010","2020","2030","2040","2050","2060","2070","2080","2090","2100",
-    "2110","2120","2130","2140","2150","2160","2170","2180","2190","2200",
-    "2210","2220","2230","2240","2250","2270","2280","2290","2300",
-    "2310","2320","2330","2340","2350","2360","2370","2380","3001","3002",
-    "3003","3004","3010","3020","3030","3040","3050","3060","3080",
-    "3090","3100","4001","4002","4003","4004","4011","4020","4030","4040",
-    "4050","4061","4070","4080","4090","4100","4110","4130","4140","4150",
-    "4160","4170","4180","4190","4200","4210","4220","4230","4240","4250",
-    "4260","4270","4280","4290","4300","4310","4320","4330","4340","5110",
-    "6001","6002","6004","6010","6020","6040","6050","6060","6070","6090",
-    "7010","7020","7030","7040","8010","8020","8030","8040","8050","8060",
-    "8070","8100","8120","8150","8160","8170","8180","8190","8200","8210",
-    "8230","8240","8250","8260","8270","8280","8300","8310"
-]
-
 # ================== HELPERS ==================
 def safe_read(file):
     if not os.path.exists(file) or os.stat(file).st_size == 0:
@@ -64,13 +45,12 @@ def safe_append(file, df):
     df.to_csv(file, index=False)
 
 # ================== TRADINGVIEW ==================
-def fetch_tasi():
+def fetch_ksa():
     url = "https://scanner.tradingview.com/ksa/scan"
     payload = {
         "filter": [
             {"left": "exchange", "operation": "equal", "right": "TADAWUL"},
-            {"left": "type", "operation": "equal", "right": "stock"},
-            {"left": "market_cap_basic", "operation": "greater", "right": 1_000_000_000}
+            {"left": "type", "operation": "equal", "right": "stock"}
         ],
         "columns": [
             "name", "description", "close",
@@ -86,25 +66,16 @@ def fetch_tasi():
 
     rows = []
     for d in data:
-        desc = str(d["d"][1])
-        # Filter out Nomu / نمو
-        if "نمو" in desc or "nomu" in desc.lower():
-            continue
-
         rows.append({
             "Symbol": d["s"],
-            "Company": desc,
+            "Company": str(d["d"][1]),
             "Price": float(d["d"][2]),
             "Change %": float(d["d"][3]),
             "Relative Volume": float(d["d"][4]),
             "Volume": float(d["d"][5]),
             "Market Cap": float(d["d"][6])
         })
-
     df = pd.DataFrame(rows)
-    # Apply strict TASI filter
-    df["Code"] = df["Symbol"].str.split(":").str[-1]
-    df = df[df["Code"].isin(TASI_SYMBOLS)]
     return df
 
 # ================== INDICATORS ==================
@@ -196,9 +167,9 @@ def predict_lstm(model, scaler, df):
     return df
 
 # ================== UI ==================
-st.title("🧠 AI High Gain Dashboard – TASI Only")
+st.title("🧠 AI High Gain Dashboard – KSA")
 
-df = fetch_tasi()
+df = fetch_ksa()
 df = compute_indicators(df)
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
@@ -268,12 +239,8 @@ with tab4:
 
 # ---------- TAB 5 ----------
 with tab5:
-    st.subheader("⚡ أسهم مرشحة +2% غدًا (تاسي فقط – بدون تعلم)")
+    st.subheader("⚡ أسهم مرشحة +2% غدًا (تحليل مباشر – بدون تعلم)")
     candidates = df.copy()
-    # ---------- Strict TASI Filter ----------
-    candidates["Code"] = candidates["Symbol"].str.split(":").str[-1]
-    candidates = candidates[candidates["Code"].isin(TASI_SYMBOLS)]
-
     candidates["Score"] = 0
     candidates.loc[(candidates["RSI"] >= 45) & (candidates["RSI"] <= 65), "Score"] += 1
     candidates.loc[candidates["Price"] > candidates["EMA20"], "Score"] += 1
