@@ -61,20 +61,28 @@ def fetch_ksa():
         "range": [0, 400]
     }
 
-    r = requests.post(url, json=payload, headers=HEADERS, timeout=20)
-    data = r.json().get("data", [])
+    try:
+        r = requests.post(url, json=payload, headers=HEADERS, timeout=20)
+        r.raise_for_status()
+        data = r.json().get("data", [])
+    except Exception as e:
+        st.error(f"⚠️ خطأ في جلب البيانات: {e}")
+        return pd.DataFrame()
 
     rows = []
     for d in data:
-        rows.append({
-            "Symbol": d["s"],
-            "Company": str(d["d"][1]),
-            "Price": float(d["d"][2]),
-            "Change %": float(d["d"][3]),
-            "Relative Volume": float(d["d"][4]),
-            "Volume": float(d["d"][5]),
-            "Market Cap": float(d["d"][6])
-        })
+        try:
+            rows.append({
+                "Symbol": d.get("s", ""),
+                "Company": str(d["d"][1]) if len(d["d"]) > 1 else "",
+                "Price": float(d["d"][2]) if len(d["d"]) > 2 and d["d"][2] is not None else 0.0,
+                "Change %": float(d["d"][3]) if len(d["d"]) > 3 and d["d"][3] is not None else 0.0,
+                "Relative Volume": float(d["d"][4]) if len(d["d"]) > 4 and d["d"][4] is not None else 0.0,
+                "Volume": float(d["d"][5]) if len(d["d"]) > 5 and d["d"][5] is not None else 0.0,
+                "Market Cap": float(d["d"][6]) if len(d["d"]) > 6 and d["d"][6] is not None else 0.0
+            })
+        except Exception:
+            continue
     df = pd.DataFrame(rows)
     return df
 
@@ -217,7 +225,7 @@ with tab3:
     if preds.empty:
         st.info("لا توجد بيانات")
     else:
-        merged = preds.merge(df[["Symbol", "Change %"]], on="Symbol", how="left")
+        merged = preds.merge(df[["Symbol", "Change %", "Volume"]], on="Symbol", how="left")
         merged["Target"] = ((merged["Change %"] >= 5) & (merged["Volume"] > merged["Volume"].rolling(20).mean())).astype(int)
         merged["Reason"] = np.where(
             merged["Target"] == 1,
