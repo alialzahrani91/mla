@@ -53,11 +53,21 @@ def fetch_tradingview_market(market_code):
 # حفظ High Gain كقاعدة تدريب
 # =============================
 def save_training_data(df):
+    """حفظ High Gain لتكون قاعدة تعلم"""
+    columns = ["Symbol","Company","Price","Change %","Relative Volume","PE","Volume"]
+    
+    # إذا الملف موجود
     if os.path.exists(TRAINING_FILE):
-        existing = pd.read_csv(TRAINING_FILE)
+        if os.path.getsize(TRAINING_FILE) == 0:
+            existing = pd.DataFrame(columns=columns)
+        else:
+            existing = pd.read_csv(TRAINING_FILE)
+            if existing.empty:
+                existing = pd.DataFrame(columns=columns)
         df_all = pd.concat([existing, df], ignore_index=True)
     else:
         df_all = df
+    
     df_all.to_csv(TRAINING_FILE, index=False)
     st.success(f"✅ تم تحديث قاعدة التدريب بعدد {len(df)} سهم")
 
@@ -65,7 +75,7 @@ def save_training_data(df):
 # تدريب النموذج والتنبؤ بالأسهم المتوقع +5%
 # =============================
 def train_predict_high_gain(df_current):
-    if not os.path.exists(TRAINING_FILE) or os.path.getsize(TRAINING_FILE)==0:
+    if not os.path.exists(TRAINING_FILE) or os.path.getsize(TRAINING_FILE) == 0:
         st.info("❌ لا يوجد بيانات تدريب للتنبؤ")
         return pd.DataFrame()
     
@@ -106,7 +116,7 @@ def train_predict_high_gain(df_current):
 # =============================
 def daily_update(market_code):
     df = fetch_tradingview_market(market_code)
-    if df.empty: return pd.DataFrame(), pd.DataFrame()
+    if df.empty: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     
     high_gain = df[df["Change %"]>=5]
     if not high_gain.empty:
