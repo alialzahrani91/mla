@@ -37,12 +37,17 @@ def safe_read(file):
         return pd.DataFrame()
     return pd.read_csv(file)
 
-def safe_append(file, df):
+def safe_append(file, df, subset_cols=None):
     if df.empty:
         return
-    if os.path.exists(file):
-        df = pd.concat([pd.read_csv(file), df]).drop_duplicates()
-    df.to_csv(file, index=False)
+    df_to_save = df.copy()
+    if os.path.exists(file) and os.stat(file).st_size > 0:
+        existing = pd.read_csv(file)
+        if subset_cols:
+            df_to_save = pd.concat([existing, df_to_save]).drop_duplicates(subset=subset_cols)
+        else:
+            df_to_save = pd.concat([existing, df_to_save]).drop_duplicates()
+    df_to_save.to_csv(file, index=False)
 
 # ================== TRADINGVIEW ==================
 def fetch_ksa():
@@ -83,8 +88,7 @@ def fetch_ksa():
             })
         except Exception:
             continue
-    df = pd.DataFrame(rows)
-    return df
+    return pd.DataFrame(rows)
 
 # ================== INDICATORS ==================
 def compute_indicators(df):
@@ -174,9 +178,22 @@ def predict_lstm(model, scaler, df):
     df["LSTM_Prob"] = preds
     return df
 
+# ================== SAVE HIGH GAIN ==================
+def save_high_gain(df):
+    if df.empty:
+        st.warning("لا توجد أسهم لتخزينها اليوم")
+        return
+    df_to_save = df.copy()
+    df_to_save["Date"] = datetime.today().date()
+    os.makedirs(DATA_DIR, exist_ok=True)
+    if os.path.exists(HIGH_GAIN_FILE) and os.stat(HIGH_GAIN_FILE).st_size > 0:
+        existing = pd.read_csv(HIGH_GAIN_FILE)
+        df_to_save = pd.concat([existing, df_to_save]).drop_duplicates(subset=["Symbol","Date"])
+    df_to_save.to_csv(HIGH_GAIN_FILE, index=False)
+    st.success(f"تم الحفظ: {len(df_to_save)} سهم")
+
 # ================== UI ==================
 st.title("🧠 AI High Gain Dashboard – KSA")
-
 df = fetch_ksa()
 df = compute_indicators(df)
 
@@ -193,9 +210,7 @@ with tab1:
     high_gain = df[df["Change %"] >= 5].copy()
     st.dataframe(high_gain, use_container_width=True)
     if st.button("💾 حفظ +5% اليوم"):
-        high_gain["Date"] = datetime.today().date()
-        safe_append(HIGH_GAIN_FILE, high_gain)
-        st.success("تم الحفظ")
+        save_high_gain(high_gain)
 
 # ---------- TAB 2 ----------
 with tab2:
@@ -216,7 +231,7 @@ with tab2:
         st.dataframe(winners, use_container_width=True)
         if st.button("💾 حفظ التوقعات"):
             winners["Date"] = datetime.today().date()
-            safe_append(PRED_FILE, winners)
+            safe_append(PRED_FILE, winners, subset_cols=["Symbol","Date"])
             st.success("تم الحفظ")
 
 # ---------- TAB 3 ----------
@@ -234,7 +249,7 @@ with tab3:
         )
         st.dataframe(merged, use_container_width=True)
         if st.button("🧠 تحديث قاعدة التعلم"):
-            safe_append(TRAIN_FILE, merged[LSTM_FEATURES + ["Target"]])
+            safe_append(TRAIN_FILE, merged[LSTM_FEATURES + ["Target"]], subset_cols=LSTM_FEATURES)
             st.success("تم تحديث التعلم")
 
 # ---------- TAB 4 ----------
