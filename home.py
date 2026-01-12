@@ -5,41 +5,36 @@ import numpy as np
 from sklearn.preprocessing import LabelEncoder
 import xgboost as xgb
 import os
-from datetime import datetime
 
 st.set_page_config(page_title="High Gain Stocks Auto Update", layout="wide")
 
 HEADERS = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
-WATCHLIST_FILE = "watchlist.csv"
 TRAINING_FILE = "training_data.csv"
 PREDICTED_FILE = "predicted_today.csv"
 
 # =============================
-# Helper Functions
+# Fetch TradingView Data
 # =============================
 @st.cache_data(ttl=300)
-def load_watchlist():
-    try:
-        return pd.read_csv(WATCHLIST_FILE)["Symbol"].dropna().tolist()
-    except:
-        st.error("❌ خطأ في قراءة ملف CSV")
-        return []
-
-@st.cache_data(ttl=300)
-def fetch_tradingview_data(market, tickers):
-    if not tickers: return pd.DataFrame()
-    url = f"https://scanner.tradingview.com/{market}/scan"
-    payload = {"filter": [], "symbols": {"tickers": tickers},
-               "columns":["name","description","close","change","relative_volume_10d_calc","price_earnings_ttm","volume"]}
+def fetch_tradingview_market(market_code):
+    url = f"https://scanner.tradingview.com/{market_code}/scan"
+    payload = {
+        "filter": [],
+        "symbols": {"query":{"types":[]}, "tickers":[]},
+        "columns":["name","description","close","change","relative_volume_10d_calc","price_earnings_ttm","volume"],
+        "sort": {"sortBy": "change", "sortOrder": "desc"},
+        "range": [0, 300]  # أول 300 سهم
+    }
     try:
         r = requests.post(url, json=payload, headers=HEADERS, timeout=15)
         r.raise_for_status()
-        raw = r.json().get("data", [])
+        data = r.json().get("data", [])
     except:
         st.warning("⚠️ فشل الاتصال بـ TradingView")
         return pd.DataFrame()
-    rows=[]
-    for item in raw:
+    
+    rows = []
+    for item in data:
         try:
             rows.append({
                 "Symbol": item["s"],
@@ -53,6 +48,9 @@ def fetch_tradingview_data(market, tickers):
         except: continue
     return pd.DataFrame(rows)
 
+# =============================
+# Save High Gain Data
+# =============================
 def save_training_data(df):
     """حفظ High Gain لتكون قاعدة تعلم"""
     if os.path.exists(TRAINING_FILE):
@@ -63,9 +61,11 @@ def save_training_data(df):
     df_all.to_csv(TRAINING_FILE, index=False)
     st.success(f"✅ تم تحديث قاعدة التدريب بعدد {len(df)} سهم")
 
+# =============================
+# Train & Predict
+# =============================
 def train_predict_high_gain(df_current):
-    """تدريب نموذج XGBoost والتنبؤ بالأسهم المتوقع +5%"""
-    if not os.path.exists(TRAINING_FILE):
+    if not os.path.exists(TRAINING_FILE) or os.path.getsize(TRAINING_FILE)==0:
         st.info("❌ لا يوجد بيانات تدريب للتنبؤ")
         return pd.DataFrame()
     
@@ -101,9 +101,11 @@ def train_predict_high_gain(df_current):
     
     return predicted
 
-def daily_update(market_code, tickers):
-    """تحديث يومي تلقائي للبيانات + قاعدة التدريب + ML"""
-    df = fetch_tradingview_data(market_code, tickers)
+# =============================
+# Daily Update Function
+# =============================
+def daily_update(market_code):
+    df = fetch_tradingview_market(market_code)
     if df.empty: return pd.DataFrame(), pd.DataFrame()
     
     high_gain = df[df["Change %"]>=5]
@@ -114,18 +116,16 @@ def daily_update(market_code, tickers):
     return high_gain, predicted
 
 # =============================
-# UI
+# Streamlit UI
 # =============================
 st.title("📈 High Gain Stocks Auto Update & Prediction")
 
 market = st.selectbox("اختر السوق", ["السعودي","الأمريكي"])
 market_code = "ksa" if market=="السعودي" else "america"
-tickers = load_watchlist()
-st.write(f"✅ عدد الأسهم في Watchlist: {len(tickers)}")
 
 if st.button("🔄 تحديث اليوم"):
     with st.spinner("جارٍ تحديث البيانات وتحليل الأسهم..."):
-        high_gain, predicted = daily_update(market_code, tickers)
+        high_gain, predicted = daily_update(market_code)
         
         st.subheader("📈 أسهم حققت +5% اليوم")
         if high_gain.empty:
