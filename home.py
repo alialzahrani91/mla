@@ -4,33 +4,26 @@ import numpy as np
 import requests
 import os
 from datetime import datetime
-
-# ML
-import xgboost as xgb
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.utils.class_weight import compute_class_weight
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+import xgboost as xgb
 
+# Tensorflow
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.callbacks import EarlyStopping
 
 # ================= CONFIG =================
 st.set_page_config("AI High Gain Dashboard – KSA", layout="wide")
-
 HEADERS = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
+
+# إنشاء مجلد البيانات
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
-
 HIGH_GAIN_FILE = os.path.join(DATA_DIR, "high_gain_today.csv")
 PRED_FILE = os.path.join(DATA_DIR, "predictions.csv")
 TRAIN_FILE = os.path.join(DATA_DIR, "training.csv")
-
-BASE_FEATURES = ["Change %", "Relative Volume", "Volume"]
-LSTM_FEATURES = [
-    "Change %", "Relative Volume", "Volume",
-    "EMA20", "EMA50", "EMA200", "RSI", "MACD", "ATR"
-]
-TIME_STEPS = 20
 
 # ================= HELPERS =================
 def safe_read(file):
@@ -114,11 +107,26 @@ def compute_indicators(df):
     df.fillna(method="bfill", inplace=True)
     return df
 
-# ================== UI ==================
+# ================= ML =================
+def train_xgboost(df):
+    features = ["Change %","Relative Volume","Volume","EMA20","EMA50","EMA200","RSI","MACD","ATR"]
+    df = df.copy()
+    df["Target"] = (df["Change %"].shift(-1) >= 5).astype(int)
+    df.dropna(inplace=True)
+    X = df[features]
+    y = df["Target"]
+    model = xgb.XGBClassifier(use_label_encoder=False, eval_metric='logloss')
+    model.fit(X, y)
+    df["Predicted"] = model.predict(X)
+    return df[["Symbol","Predicted"]]
+
+# ================== STREAMLIT ==================
 st.title("🧠 AI High Gain Dashboard – KSA")
+
 df = fetch_ksa()
 if df.empty:
     st.stop()
+
 df = compute_indicators(df)
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
@@ -134,6 +142,29 @@ with tab1:
     high_gain = df[df["Change %"] >= 5].copy()
     st.dataframe(high_gain, use_container_width=True)
     if st.button("💾 حفظ +5% اليوم"):
-        save_high_gain(high_gain)
+        safe_append(HIGH_GAIN_FILE, high_gain, subset_cols=["Symbol","Date"])
 
-# TAB2-TAB5 يمكنك إضافة Ensemble/التعلم والتحليل لاحقًا بنفس الأسلوب مع حفظ الملفات
+# ---------- TAB 2 ----------
+with tab2:
+    pred = train_xgboost(df)
+    st.subheader("التنبؤ بالأسهم التي قد تحقق +5% غدًا")
+    st.dataframe(pred, use_container_width=True)
+    if st.button("💾 حفظ التنبؤات"):
+        safe_append(PRED_FILE, pred, subset_cols=["Symbol","Date"])
+
+# ---------- TAB 3 ----------
+with tab3:
+    st.subheader("تقييم التعلم")
+    training_data = safe_read(TRAIN_FILE)
+    st.dataframe(training_data, use_container_width=True)
+
+# ---------- TAB 4 ----------
+with tab4:
+    st.subheader("Dashboard")
+    st.dataframe(df, use_container_width=True)
+
+# ---------- TAB 5 ----------
+with tab5:
+    potential = df[df["Change %"] >= 2].copy()
+    st.subheader("فرص +2% تحليل مباشر")
+    st.dataframe(potential, use_container_width=True)
