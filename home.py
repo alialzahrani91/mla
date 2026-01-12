@@ -296,9 +296,20 @@ with tab4:
     st.bar_chart(df["Change %"])
     # ---------- TAB 5 ----------
 with tab5:
-    st.subheader("⚡ أسهم مرشحة لتحقيق +2% غدًا (بدون تعلم)")
+   with tab5:
+    st.subheader("⚡ فرص +2% غدًا (تاسي فقط – بدون تعلم)")
 
     candidates = df.copy()
+
+    # ---- TASI FILTER (STRICT) ----
+    candidates["Code"] = candidates["Symbol"].str.split(":").str[-1]
+
+    candidates = candidates[
+        (candidates["Code"].isin(TASI_SYMBOLS)) &
+        (candidates["Relative Volume"] >= 0.8) &
+        (candidates["Price"] >= 10)
+    ]
+
 
     candidates["Score"] = 0
 
