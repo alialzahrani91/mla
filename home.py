@@ -2,15 +2,16 @@ import streamlit as st
 import requests
 import pandas as pd
 import numpy as np
+import os
 from sklearn.preprocessing import LabelEncoder
 import xgboost as xgb
-import os
 
-st.set_page_config(page_title="High Gain Stocks Auto Update & Prediction", layout="wide")
+st.set_page_config(page_title="High Gain Stocks Dashboard", layout="wide")
 
 HEADERS = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
+HIGH_GAIN_FILE = "high_gain_today.csv"
+PREDICTED_FILE = "predicted.csv"
 TRAINING_FILE = "training_data.csv"
-PREDICTED_FILE = "predicted_today.csv"
 
 # =============================
 # جلب بيانات السوق من TradingView
@@ -50,43 +51,91 @@ def fetch_tradingview_market(market_code):
     return pd.DataFrame(rows)
 
 # =============================
-# حفظ High Gain كقاعدة تدريب
+# حفظ CSV بحماية من EmptyDataError
 # =============================
-def save_training_data(df):
-    """حفظ High Gain لتكون قاعدة تعلم"""
-    # إذا لا يوجد أسهم اليوم لا نفعل شيء
+def safe_save_csv(df, filename):
     if df.empty:
-        st.info("⚠️ لا توجد أسهم +5% اليوم للحفظ")
+        st.info(f"⚠️ الملف {filename} فارغ ولم يتم الحفظ")
         return
-    
-    columns = ["Symbol","Company","Price","Change %","Relative Volume","PE","Volume"]
-    
-    # إنشاء الملف إذا غير موجود أو فارغ
-    if os.path.exists(TRAINING_FILE):
-        if os.path.getsize(TRAINING_FILE) == 0:
-            existing = pd.DataFrame(columns=columns)
-        else:
-            existing = pd.read_csv(TRAINING_FILE)
-            if existing.empty:
-                existing = pd.DataFrame(columns=columns)
-        df_all = pd.concat([existing, df], ignore_index=True)
-    else:
-        df_all = df
-    
-    df_all.to_csv(TRAINING_FILE, index=False)
-    st.success(f"✅ تم تحديث قاعدة التدريب بعدد {len(df)} سهم")
+    df.to_csv(filename, index=False)
+    st.success(f"✅ تم حفظ الملف: {filename} ({len(df)} صفوف)")
+
+def safe_read_csv(filename, columns=None):
+    try:
+        df = pd.read_csv(filename)
+        if df.empty and columns:
+            df = pd.DataFrame(columns=columns)
+        return df
+    except (FileNotFoundError, pd.errors.EmptyDataError):
+        if columns:
+            return pd.DataFrame(columns=columns)
+        return pd.DataFrame()
 
 # =============================
-# تدريب النموذج والتنبؤ بالأسهم المتوقع +5%
+# التاب الأول: High Gain اليوم
 # =============================
-def train_predict_high_gain(df_current):
-    if not os.path.exists(TRAINING_FILE) or os.path.getsize(TRAINING_FILE) == 0:
-        st.info("❌ لا يوجد بيانات تدريب للتنبؤ")
+def tab_high_gain_today(market_code):
+    st.subheader("📈 أسهم اليوم +5%")
+    df = fetch_tradingview_market(market_code)
+    if df.empty:
+        st.info("لا توجد بيانات حالياً")
         return pd.DataFrame()
     
-    training = pd.read_csv(TRAINING_FILE)
+    high_gain = df[df["Change %"] >= 5]
+    st.dataframe(high_gain,use_container_width=True,hide_index=True)
+    
+    safe_save_csv(high_gain, HIGH_GAIN_FILE)
+    return high_gain
+
+# =============================
+# التاب الثاني: التنبؤ بالأسهم المحتملة غداً
+# =============================
+def tab_predicted(df_current):
+    st.subheader("🔮 أسهم متوقعة +5% غدًا")
+    if df_current.empty:
+        st.info("لا توجد أسهم لتحليل التنبؤ")
+        return pd.DataFrame()
+    
+    # نموذج مبسط: اختيار أسهم قوية نسبياً من حيث Change% و Relative Volume
+    df_current["Score"] = df_current["Change %"]*0.6 + df_current["Relative Volume"]*0.4
+    predicted = df_current.sort_values("Score", ascending=False).head(30)
+    
+    st.dataframe(predicted,use_container_width=True,hide_index=True)
+    safe_save_csv(predicted, PREDICTED_FILE)
+    return predicted
+
+# =============================
+# التاب الثالث: تقييم الأسهم بعد الإغلاق
+# =============================
+def tab_evaluate():
+    st.subheader("📊 تقييم الأسهم المتوقعة")
+    columns = ["Symbol","Company","Price","Change %","Relative Volume","PE","Volume"]
+    predicted = safe_read_csv(PREDICTED_FILE, columns=columns)
+    if predicted.empty:
+        st.info("لا توجد أسهم للتقييم")
+        return pd.DataFrame()
+    
+    # التقييم: إذا Change % >=5 اليوم -> تحقق، وإلا فشل
+    df_market = fetch_tradingview_market("ksa")  # مثال للسوق السعودي
+    merged = pd.merge(predicted, df_market[["Symbol","Change %"]], on="Symbol", how="left", suffixes=("","_today"))
+    
+    merged["Achieved +5%"] = merged["Change %_today"] >= 5
+    merged["Reason"] = np.where(merged["Achieved +5%"], "📈 تحقق +5%", "⚠️ لم يتحقق +5%")
+    
+    st.dataframe(merged,use_container_width=True,hide_index=True)
+    
+    # حفظ كقاعدة للتعلم
+    safe_save_csv(merged, TRAINING_FILE)
+    return merged
+
+# =============================
+# التاب الرابع: التنبؤ بناءً على التعلم
+# =============================
+def tab_predict_learning():
+    st.subheader("🔮 تنبؤات غدًا بناءً على التعلم")
+    training = safe_read_csv(TRAINING_FILE)
     if training.empty:
-        st.info("❌ ملف التدريب فارغ")
+        st.info("❌ لا توجد بيانات تعلم كافية")
         return pd.DataFrame()
     
     le = LabelEncoder()
@@ -94,78 +143,47 @@ def train_predict_high_gain(df_current):
     
     features = ["Price","Change %","Relative Volume","PE","Volume","symbol_code"]
     X = training[features].fillna(0)
-    y = (training["Change %"].shift(-1)>=5).astype(int)[:-1]
-    X = X[:-1]
+    y = training["Achieved +5%"].astype(int)
     
-    if len(y)<5:
-        st.info("❌ بيانات التدريب قليلة للتنبؤ")
+    if y.nunique() < 2:
+        st.info("❌ بيانات غير كافية للتنبؤ")
         return pd.DataFrame()
     
-    model = xgb.XGBClassifier(n_estimators=200, learning_rate=0.1, max_depth=5, random_state=42)
+    model = xgb.XGBClassifier(n_estimators=100, max_depth=5, learning_rate=0.1, random_state=42)
     model.fit(X, y)
     
-    df_curr = df_current.copy()
-    df_curr["symbol_code"] = le.transform(df_curr["Symbol"].astype(str))
-    X_curr = df_curr[features].fillna(0)
-    df_curr["Probability +5%"] = model.predict_proba(X_curr)[:,1]
+    # التنبؤ باستخدام آخر يوم High Gain
+    last_day = safe_read_csv(HIGH_GAIN_FILE)
+    if last_day.empty:
+        st.info("❌ لا توجد بيانات High Gain اليوم للتنبؤ")
+        return pd.DataFrame()
     
-    predicted = df_curr[df_curr["Probability +5%"]>=0.5].sort_values("Probability +5%", ascending=False)
+    last_day["symbol_code"] = le.transform(last_day["Symbol"].astype(str))
+    X_last = last_day[features].fillna(0)
+    last_day["Probability +5%"] = model.predict_proba(X_last)[:,1]
     
-    if not predicted.empty:
-        predicted.to_csv(PREDICTED_FILE, index=False)
-    
+    predicted = last_day[last_day["Probability +5%"] >= 0.5]
+    st.dataframe(predicted,use_container_width=True,hide_index=True)
+    safe_save_csv(predicted, "predicted_learning.csv")
     return predicted
 
 # =============================
-# تحديث يومي تلقائي
+# واجهة Streamlit
 # =============================
-def daily_update(market_code):
-    df = fetch_tradingview_market(market_code)
-    if df.empty: 
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-    
-    high_gain = df[df["Change %"]>=5]
-    
-    # فقط احفظ إذا هناك أسهم High Gain
-    if not high_gain.empty:
-        save_training_data(high_gain)
-    
-    predicted = train_predict_high_gain(df)
-    return df, high_gain, predicted
+st.title("📊 High Gain Stocks Dashboard")
+tabs = st.tabs(["High Gain اليوم","تنبؤ محتمل غدًا","تقييم الأسهم","تنبؤ التعلم"])
 
-# =============================
-# واجهة المستخدم
-# =============================
-st.title("📈 High Gain Stocks Auto Update & Prediction")
+market_choice = st.selectbox("اختر السوق", ["السعودي","الأمريكي"])
+market_code = "ksa" if market_choice=="السعودي" else "america"
 
-market = st.selectbox("اختر السوق", ["السعودي","الأمريكي"])
-market_code = "ksa" if market=="السعودي" else "america"
+with tabs[0]:
+    high_gain = tab_high_gain_today(market_code)
 
-# جلب وعرض بيانات السوق فور اختيار السوق
-with st.spinner("جارٍ جلب بيانات السوق..."):
-    df, high_gain, predicted = daily_update(market_code)
+with tabs[1]:
+    predicted = tab_predicted(high_gain)
 
-st.subheader("📊 أسهم السوق")
-if df.empty:
-    st.info("لا توجد بيانات حالياً")
-else:
-    st.dataframe(df,use_container_width=True,hide_index=True)
+with tabs[2]:
+    evaluated = tab_evaluate()
 
-st.subheader("📈 أسهم حققت +5% اليوم")
-if high_gain.empty:
-    st.info("لا توجد أسهم حققت +5% اليوم")
-else:
-    st.dataframe(high_gain,use_container_width=True,hide_index=True)
-
-st.subheader("🔮 الأسهم المتوقع +5% غدًا")
-if predicted.empty:
-    st.info("لا توجد أسهم متوقعة تحقيق +5% اليوم")
-else:
-    st.dataframe(predicted[["Symbol","Company","Price","Change %","Relative Volume","PE","Volume","Probability +5%"]],
-                 use_container_width=True,hide_index=True)
-
-# زر لتحديث البيانات مرة أخرى (اختياري)
-if st.button("🔄 تحديث البيانات"):
-    with st.spinner("جارٍ تحديث البيانات وتحليل الأسهم..."):
-        df, high_gain, predicted = daily_update(market_code)
-        st.experimental_rerun()
+with tabs[3]:
+    predicted_learning = tab_predict_learning()
