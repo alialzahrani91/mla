@@ -24,7 +24,7 @@ def fetch_tradingview_market(market_code):
         "columns":["name","description","close","change","relative_volume_10d_calc",
                    "price_earnings_ttm","volume"],
         "sort": {"sortBy": "change", "sortOrder": "desc"},
-        "range": [0, 300]  # أول 300 سهم
+        "range": [0, 300]
     }
     try:
         r = requests.post(url, json=payload, headers=HEADERS, timeout=15)
@@ -54,9 +54,14 @@ def fetch_tradingview_market(market_code):
 # =============================
 def save_training_data(df):
     """حفظ High Gain لتكون قاعدة تعلم"""
+    # إذا لا يوجد أسهم اليوم لا نفعل شيء
+    if df.empty:
+        st.info("⚠️ لا توجد أسهم +5% اليوم للحفظ")
+        return
+    
     columns = ["Symbol","Company","Price","Change %","Relative Volume","PE","Volume"]
     
-    # إذا الملف موجود
+    # إنشاء الملف إذا غير موجود أو فارغ
     if os.path.exists(TRAINING_FILE):
         if os.path.getsize(TRAINING_FILE) == 0:
             existing = pd.DataFrame(columns=columns)
@@ -116,9 +121,12 @@ def train_predict_high_gain(df_current):
 # =============================
 def daily_update(market_code):
     df = fetch_tradingview_market(market_code)
-    if df.empty: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    if df.empty: 
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     
     high_gain = df[df["Change %"]>=5]
+    
+    # فقط احفظ إذا هناك أسهم High Gain
     if not high_gain.empty:
         save_training_data(high_gain)
     
