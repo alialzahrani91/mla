@@ -6,14 +6,14 @@ from sklearn.preprocessing import LabelEncoder
 import xgboost as xgb
 import os
 
-st.set_page_config(page_title="High Gain Stocks Auto Update", layout="wide")
+st.set_page_config(page_title="High Gain Stocks Auto Update & Prediction", layout="wide")
 
 HEADERS = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
 TRAINING_FILE = "training_data.csv"
 PREDICTED_FILE = "predicted_today.csv"
 
 # =============================
-# Fetch TradingView Data
+# جلب بيانات السوق من TradingView
 # =============================
 @st.cache_data(ttl=300)
 def fetch_tradingview_market(market_code):
@@ -21,7 +21,8 @@ def fetch_tradingview_market(market_code):
     payload = {
         "filter": [],
         "symbols": {"query":{"types":[]}, "tickers":[]},
-        "columns":["name","description","close","change","relative_volume_10d_calc","price_earnings_ttm","volume"],
+        "columns":["name","description","close","change","relative_volume_10d_calc",
+                   "price_earnings_ttm","volume"],
         "sort": {"sortBy": "change", "sortOrder": "desc"},
         "range": [0, 300]  # أول 300 سهم
     }
@@ -49,10 +50,9 @@ def fetch_tradingview_market(market_code):
     return pd.DataFrame(rows)
 
 # =============================
-# Save High Gain Data
+# حفظ High Gain كقاعدة تدريب
 # =============================
 def save_training_data(df):
-    """حفظ High Gain لتكون قاعدة تعلم"""
     if os.path.exists(TRAINING_FILE):
         existing = pd.read_csv(TRAINING_FILE)
         df_all = pd.concat([existing, df], ignore_index=True)
@@ -62,7 +62,7 @@ def save_training_data(df):
     st.success(f"✅ تم تحديث قاعدة التدريب بعدد {len(df)} سهم")
 
 # =============================
-# Train & Predict
+# تدريب النموذج والتنبؤ بالأسهم المتوقع +5%
 # =============================
 def train_predict_high_gain(df_current):
     if not os.path.exists(TRAINING_FILE) or os.path.getsize(TRAINING_FILE)==0:
@@ -102,7 +102,7 @@ def train_predict_high_gain(df_current):
     return predicted
 
 # =============================
-# Daily Update Function
+# تحديث يومي تلقائي
 # =============================
 def daily_update(market_code):
     df = fetch_tradingview_market(market_code)
@@ -113,29 +113,41 @@ def daily_update(market_code):
         save_training_data(high_gain)
     
     predicted = train_predict_high_gain(df)
-    return high_gain, predicted
+    return df, high_gain, predicted
 
 # =============================
-# Streamlit UI
+# واجهة المستخدم
 # =============================
 st.title("📈 High Gain Stocks Auto Update & Prediction")
 
 market = st.selectbox("اختر السوق", ["السعودي","الأمريكي"])
 market_code = "ksa" if market=="السعودي" else "america"
 
-if st.button("🔄 تحديث اليوم"):
+# جلب وعرض بيانات السوق فور اختيار السوق
+with st.spinner("جارٍ جلب بيانات السوق..."):
+    df, high_gain, predicted = daily_update(market_code)
+
+st.subheader("📊 أسهم السوق")
+if df.empty:
+    st.info("لا توجد بيانات حالياً")
+else:
+    st.dataframe(df,use_container_width=True,hide_index=True)
+
+st.subheader("📈 أسهم حققت +5% اليوم")
+if high_gain.empty:
+    st.info("لا توجد أسهم حققت +5% اليوم")
+else:
+    st.dataframe(high_gain,use_container_width=True,hide_index=True)
+
+st.subheader("🔮 الأسهم المتوقع +5% غدًا")
+if predicted.empty:
+    st.info("لا توجد أسهم متوقعة تحقيق +5% اليوم")
+else:
+    st.dataframe(predicted[["Symbol","Company","Price","Change %","Relative Volume","PE","Volume","Probability +5%"]],
+                 use_container_width=True,hide_index=True)
+
+# زر لتحديث البيانات مرة أخرى (اختياري)
+if st.button("🔄 تحديث البيانات"):
     with st.spinner("جارٍ تحديث البيانات وتحليل الأسهم..."):
-        high_gain, predicted = daily_update(market_code)
-        
-        st.subheader("📈 أسهم حققت +5% اليوم")
-        if high_gain.empty:
-            st.info("لا توجد أسهم حققت +5% اليوم")
-        else:
-            st.dataframe(high_gain,use_container_width=True,hide_index=True)
-        
-        st.subheader("🔮 الأسهم المتوقع +5% غدًا")
-        if predicted.empty:
-            st.info("لا توجد أسهم متوقعة تحقيق +5% اليوم")
-        else:
-            st.dataframe(predicted[["Symbol","Company","Price","Change %","Relative Volume","PE","Volume","Probability +5%"]],
-                         use_container_width=True,hide_index=True)
+        df, high_gain, predicted = daily_update(market_code)
+        st.experimental_rerun()
