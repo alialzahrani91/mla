@@ -7,12 +7,13 @@ from datetime import datetime
 import xgboost as xgb
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
+from ta.momentum import RSIIndicator
 
 # ================= CONFIG =================
 st.set_page_config("AI High Gain Dashboard – KSA", layout="wide")
 HEADERS = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
 
-# مجلد البيانات
+# إنشاء مجلد البيانات
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 HIGH_GAIN_FILE = os.path.join(DATA_DIR, "high_gain_today.csv")
@@ -30,7 +31,6 @@ def safe_read(file):
 
 def safe_append(file, df, subset_cols=None):
     if df.empty:
-        st.warning("لا توجد بيانات للحفظ")
         return
     df_to_save = df.copy()
     df_to_save["Date"] = pd.to_datetime("today").date()
@@ -47,7 +47,7 @@ def safe_append(file, df, subset_cols=None):
     st.success(f"تم حفظ {len(df_to_save)} سهم في {file}")
 
 # ================= TRADINGVIEW =================
-def fetch_ksa_stocks():
+def fetch_ksa():
     url = "https://scanner.tradingview.com/ksa/scan"
     payload = {
         "filter": [
@@ -68,7 +68,6 @@ def fetch_ksa_stocks():
     except Exception as e:
         st.error(f"⚠️ خطأ في جلب البيانات: {e}")
         return pd.DataFrame()
-
     rows = []
     for d in data:
         try:
@@ -83,30 +82,20 @@ def fetch_ksa_stocks():
             })
         except:
             continue
-    df = pd.DataFrame(rows)
-    df.dropna(subset=["Price"], inplace=True)
-    return df
+    return pd.DataFrame(rows)
 
 # ================= INDICATORS =================
 def compute_indicators(df):
     df = df.copy()
-    # EMA
-    df["EMA20"] = df["Price"].ewm(span=20, adjust=False).mean()
-    df["EMA50"] = df["Price"].ewm(span=50, adjust=False).mean()
-    df["EMA200"] = df["Price"].ewm(span=200, adjust=False).mean()
+    df["EMA20"] = df["Price"].ewm(span=20).mean()
+    df["EMA50"] = df["Price"].ewm(span=50).mean()
+    df["EMA200"] = df["Price"].ewm(span=200).mean()
     # RSI
-    delta = df["Price"].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
-    rs = avg_gain / avg_loss
-    df["RSI"] = 100 - (100 / (1 + rs))
-    # MACD
-    ema12 = df["Price"].ewm(span=12, adjust=False).mean()
-    ema26 = df["Price"].ewm(span=26, adjust=False).mean()
-    df["MACD"] = ema12 - ema26
-    # ATR
+    try:
+        df["RSI"] = RSIIndicator(df["Price"]).rsi()
+    except:
+        df["RSI"] = np.nan
+    df["MACD"] = df["Price"].ewm(span=12).mean() - df["Price"].ewm(span=26).mean()
     df["ATR"] = df["Price"].rolling(14).max() - df["Price"].rolling(14).min()
     df.fillna(method="bfill", inplace=True)
     return df
@@ -117,8 +106,6 @@ def train_xgboost(df):
     df = df.copy()
     df["Target"] = (df["Change %"].shift(-1) >= 5).astype(int)
     df.dropna(inplace=True)
-    if df.empty:
-        return pd.DataFrame()
     X = df[features]
     y = df["Target"]
     model = xgb.XGBClassifier(use_label_encoder=False, eval_metric='logloss')
@@ -126,34 +113,43 @@ def train_xgboost(df):
     df["Predicted"] = model.predict(X)
     return df[["Symbol","Company","Predicted"]]
 
-# ================= Top 20 for Next Day =================
+# ================= TOP 20 NEXT DAY =================
 def top_20_next_day(df):
     df = df.copy()
     reasons = []
+    scores = []
+
     for _, row in df.iterrows():
         reason_list = []
+        score = 0
         if row["EMA20"] > row["EMA50"]:
             reason_list.append("EMA20>EMA50")
+            score += 1
         if row["EMA20"] > row["EMA200"]:
             reason_list.append("EMA20>EMA200")
-        if 30 < row["RSI"] < 70:
-            reason_list.append("RSI جيد")
+            score += 1
+        if 30 < row["RSI"] < 60:
+            reason_list.append("RSI متوازن")
+            score += 1
         if row["MACD"] > 0:
             reason_list.append("MACD إيجابي")
+            score += 1
         if row["Relative Volume"] > 1:
-            reason_list.append("فوليوم مرتفع")
+            reason_list.append("حجم تداول أعلى من المتوسط")
+            score += 1
+
         reasons.append(", ".join(reason_list) if reason_list else "مراقبة")
+        scores.append(score)
 
     df["سبب الترشيح"] = reasons
-    df_sorted = df.sort_values(
-        by=["Change %","Relative Volume","RSI","MACD","ATR"], ascending=False
-    ).head(20)
-    return df_sorted[["Symbol","Company","Price","Change %","Relative Volume","RSI","MACD","ATR","سبب الترشيح"]]
+    df["Score"] = scores
+    df_sorted = df.sort_values(by="Score", ascending=False).head(20)
+    return df_sorted[["Symbol","Company","Price","Change %","Relative Volume","RSI","MACD","ATR","سبب الترشيح","Score"]]
 
-# ================= STREAMLIT ==================
+# ================== STREAMLIT ==================
 st.title("🧠 AI High Gain Dashboard – KSA")
 
-df = fetch_ksa_stocks()
+df = fetch_ksa()
 if df.empty:
     st.stop()
 
@@ -165,7 +161,7 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🧠 التعلم والتقييم",
     "📊 Dashboard",
     "⚡ فرص +2% غدًا",
-    "⭐ أفضل 20 فرص الغد"
+    "⭐ أفضل 20 سهم للغد"
 ])
 
 # ---------- TAB 1 ----------
@@ -203,5 +199,5 @@ with tab5:
 # ---------- TAB 6 ----------
 with tab6:
     top20 = top_20_next_day(df)
-    st.subheader("أفضل 20 سهم محتمل +5% الغد")
+    st.subheader("أفضل 20 سهم للغد بناءً على إشارات فنية")
     st.dataframe(top20, use_container_width=True)
