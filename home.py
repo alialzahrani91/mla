@@ -90,11 +90,11 @@ def fetch_ksa_stocks():
 # ================= INDICATORS =================
 def compute_indicators(df):
     df = df.copy()
+    # EMA
     df["EMA20"] = df["Price"].ewm(span=20, adjust=False).mean()
     df["EMA50"] = df["Price"].ewm(span=50, adjust=False).mean()
     df["EMA200"] = df["Price"].ewm(span=200, adjust=False).mean()
-
-    # RSI يدوي
+    # RSI
     delta = df["Price"].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -102,13 +102,11 @@ def compute_indicators(df):
     avg_loss = loss.rolling(14).mean()
     rs = avg_gain / avg_loss
     df["RSI"] = 100 - (100 / (1 + rs))
-
     # MACD
     ema12 = df["Price"].ewm(span=12, adjust=False).mean()
     ema26 = df["Price"].ewm(span=26, adjust=False).mean()
     df["MACD"] = ema12 - ema26
-
-    # ATR تقريبي
+    # ATR
     df["ATR"] = df["Price"].rolling(14).max() - df["Price"].rolling(14).min()
     df.fillna(method="bfill", inplace=True)
     return df
@@ -128,6 +126,30 @@ def train_xgboost(df):
     df["Predicted"] = model.predict(X)
     return df[["Symbol","Company","Predicted"]]
 
+# ================= Top 20 for Next Day =================
+def top_20_next_day(df):
+    df = df.copy()
+    reasons = []
+    for _, row in df.iterrows():
+        reason_list = []
+        if row["EMA20"] > row["EMA50"]:
+            reason_list.append("EMA20>EMA50")
+        if row["EMA20"] > row["EMA200"]:
+            reason_list.append("EMA20>EMA200")
+        if 30 < row["RSI"] < 70:
+            reason_list.append("RSI جيد")
+        if row["MACD"] > 0:
+            reason_list.append("MACD إيجابي")
+        if row["Relative Volume"] > 1:
+            reason_list.append("فوليوم مرتفع")
+        reasons.append(", ".join(reason_list) if reason_list else "مراقبة")
+
+    df["سبب الترشيح"] = reasons
+    df_sorted = df.sort_values(
+        by=["Change %","Relative Volume","RSI","MACD","ATR"], ascending=False
+    ).head(20)
+    return df_sorted[["Symbol","Company","Price","Change %","Relative Volume","RSI","MACD","ATR","سبب الترشيح"]]
+
 # ================= STREAMLIT ==================
 st.title("🧠 AI High Gain Dashboard – KSA")
 
@@ -143,7 +165,7 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🧠 التعلم والتقييم",
     "📊 Dashboard",
     "⚡ فرص +2% غدًا",
-    "⭐ أفضل 10 فرص الغد"
+    "⭐ أفضل 20 فرص الغد"
 ])
 
 # ---------- TAB 1 ----------
@@ -180,9 +202,6 @@ with tab5:
 
 # ---------- TAB 6 ----------
 with tab6:
-    # أفضل 10 أسهم للغد بناء على Change %, Relative Volume, RSI, MACD, ATR
-    df_sorted = df.sort_values(
-        by=["Change %","Relative Volume","RSI","MACD","ATR"], ascending=False
-    ).head(10)
-    st.subheader("أفضل 10 أسهم محتملة +5% الغد")
-    st.dataframe(df_sorted[["Symbol","Company","Price","Change %","Relative Volume","RSI","MACD","ATR"]], use_container_width=True)
+    top20 = top_20_next_day(df)
+    st.subheader("أفضل 20 سهم محتمل +5% الغد")
+    st.dataframe(top20, use_container_width=True)
