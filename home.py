@@ -1,195 +1,226 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import requests
+import yfinance as yf
 import os
-from datetime import date
-import xgboost as xgb
+from datetime import datetime
 
-# ================= CONFIG =================
-st.set_page_config("تركي وحمد", layout="wide")
-HEADERS = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
+from ta.momentum import RSIIndicator
+from ta.trend import MACD
+
+from sklearn.model_selection import train_test_split
+from xgboost import XGBClassifier
+
+# ======================
+# إعدادات عامة
+# ======================
+st.set_page_config(page_title="High Gain Stocks AI", layout="wide")
 
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
-HIGH_GAIN_FILE = f"{DATA_DIR}/high_gain_today.csv"
-PRED_FILE = f"{DATA_DIR}/predictions.csv"
-NEXT_DAY_FILE = f"{DATA_DIR}/next_day_candidates.csv"
+TODAY_FILE = f"{DATA_DIR}/today_5pct.csv"
+PREDICT_FILE = f"{DATA_DIR}/predicted_next.csv"
+LEARN_FILE = f"{DATA_DIR}/learning_db.csv"
 
-# ================= UTILS =================
-def save_csv(file, df):
-    if df.empty:
-        return
-    df = df.copy()
-    df["Date"] = date.today()
-    if os.path.exists(file):
-        old = pd.read_csv(file)
-        df = pd.concat([old, df]).drop_duplicates(subset=["Symbol","Date"])
-    df.to_csv(file, index=False)
+# ======================
+# جلب الأسهم (مثال سوق سعودي عبر Yahoo)
+# ======================
+@st.cache_data(ttl=3600)
+def fetch_ksa_stocks():
+    tickers = [
+        "2222.SR", "1120.SR", "2010.SR", "1211.SR", "1180.SR",
+        "7010.SR", "1060.SR", "5110.SR", "2290.SR", "4260.SR",
+        "1050.SR", "4140.SR", "3002.SR", "2330.SR", "4002.SR"
+    ]
 
-def safe_float(v):
-    try:
-        return float(v)
-    except:
-        return 0.0
+    rows = []
 
-# ================= TRADINGVIEW =================
-def scan_tv(columns, sort_col):
-    url = "https://scanner.tradingview.com/ksa/scan"
-    payload = {
-        "filter": [
-            {"left":"exchange","operation":"equal","right":"TADAWUL"},
-            {"left":"type","operation":"equal","right":"stock"}
-        ],
-        "columns": columns,
-        "sort":{"sortBy":sort_col,"sortOrder":"desc"},
-        "range":[0,500]
-    }
-    r = requests.post(url, json=payload, headers=HEADERS, timeout=20)
-    data = r.json().get("data",[])
-    rows=[]
-    for d in data:
+    for t in tickers:
+        df = yf.download(t, period="30d", interval="1d", progress=False)
+        if df.empty:
+            continue
+
+        df.dropna(inplace=True)
+
+        close = df["Close"]
+        volume = df["Volume"]
+
+        rsi = RSIIndicator(close).rsi().iloc[-1]
+        macd_val = MACD(close).macd().iloc[-1]
+
+        change = ((close.iloc[-1] - close.iloc[-2]) / close.iloc[-2]) * 100
+
         rows.append({
-            "Symbol": d["s"],
-            **{columns[i]: safe_float(d["d"][i]) for i in range(len(columns))}
+            "Symbol": t,
+            "Company": t.replace(".SR", ""),
+            "price": round(close.iloc[-1], 2),
+            "change": round(change, 2),
+            "volume": int(volume.iloc[-1]),
+            "RSI": round(rsi, 2),
+            "MACD": round(macd_val, 3)
         })
+
     return pd.DataFrame(rows)
 
-# ================= DATA =================
-def fetch_daily():
-    return scan_tv(
-        ["close","change","volume","RSI","MACD.macd"],
-        "change"
-    )
+# ======================
+# حفظ CSV مع إنشاء تلقائي
+# ======================
+def safe_save(df, path):
+    if os.path.exists(path):
+        old = pd.read_csv(path)
+        df = pd.concat([old, df]).drop_duplicates(subset=["Symbol"])
+    df.to_csv(path, index=False)
 
-def fetch_15m():
-    return scan_tv(
-        ["close","change|15","RSI|15","MACD.macd|15"],
-        "change|15"
-    )
-
-def fetch_1h():
-    return scan_tv(
-        ["close","change|60","RSI|60","MACD.macd|60"],
-        "change|60"
-    )
-
-# ================= ML =================
-def xgboost_predict(df):
-    df = df.copy()
-    df["Target"] = (df["change"] >= 5).astype(int)
-    features = ["change","volume","RSI","MACD.macd"]
-    X = df[features]
-    y = df["Target"]
-
-    model = xgb.XGBClassifier(eval_metric="logloss")
-    model.fit(X, y)
-    df["Prediction"] = model.predict_proba(X)[:,1]
-    return df.sort_values("Prediction", ascending=False)
-
-# ================= NEXT DAY BREAKOUT =================
+# ======================
+# مرشحي اختراق الغد (تحليل بدون تعلم)
+# ======================
 def next_day_breakout_candidates(df):
     df = df.copy()
-
-    # استبعاد الأسهم التي انفجرت اليوم
     df = df[(df["change"] < 3) & (df["change"] > 0.3)]
 
-    score = pd.Series(0, index=df.index)
+    scores, reasons = [], []
+    vol_med = df["volume"].median()
 
-    # Volume Accumulation
-    score += (df["volume"] > df["volume"].median()).astype(int) * 2
+    for _, r in df.iterrows():
+        score = 0
+        reason = []
 
-    # RSI في منطقة الانطلاق
-    score += ((df["RSI"] > 45) & (df["RSI"] < 60)).astype(int) * 2
+        if r["volume"] > vol_med:
+            score += 2
+            reason.append("تجميع حجم تداول")
 
-    # MACD قريب من التقاطع
-    score += (df["MACD.macd"].between(-0.2, 0.15)).astype(int) * 2
+        if 45 < r["RSI"] < 60:
+            score += 2
+            reason.append("RSI مناسب للانطلاق")
 
-    # حركة سعرية إيجابية خفيفة
-    score += ((df["change"] > 0.5) & (df["change"] < 2)).astype(int)
+        if -0.2 < r["MACD"] < 0.15:
+            score += 2
+            reason.append("MACD قريب من التقاطع")
 
-    df["Breakout Score"] = score
+        if 0.5 < r["change"] < 2:
+            score += 1
+            reason.append("تحرك سعري هادئ")
 
-    return df[df["Breakout Score"] >= 5] \
-        .sort_values("Breakout Score", ascending=False) \
-        .head(10)
+        scores.append(score)
+        reasons.append(" + ".join(reason))
 
-# ================= UI =================
-st.title("🧠 AI High Gain Dashboard – Saudi Market")
+    df["Breakout Score"] = scores
+    df["Reason"] = reasons
 
-daily = fetch_daily()
-m15 = fetch_15m()
-h1 = fetch_1h()
+    return (
+        df[df["Breakout Score"] >= 5]
+        .sort_values("Breakout Score", ascending=False)
+        .head(20)
+    )
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+# ======================
+# واجهة التطبيق
+# ======================
+st.title("📊 High Gain Stocks AI Dashboard")
+
+df = fetch_ksa_stocks()
+
+tabs = st.tabs([
     "📈 +5% اليوم",
-    "🔮 XGBoost تنبؤ",
-    "⏱️ Multi-Timeframe",
-    "⚡ فرص +2%",
-    "🔮 مرشحي اختراق الغد +5%",
-    "📊 السوق كامل",
-    "💾 الملفات"
+    "🔮 توقع الغد",
+    "🧠 التعلّم",
+    "🤖 تنبؤ ذكي",
+    "🚀 مرشحي اختراق الغد"
 ])
 
-# -------- TAB 1 --------
-with tab1:
-    hg = daily[daily["change"] >= 5]
-    st.dataframe(hg, use_container_width=True)
+# ======================
+# TAB 1
+# ======================
+with tabs[0]:
+    st.subheader("الأسهم التي حققت +5% اليوم")
+    high_gain = df[df["change"] >= 5]
+
+    st.dataframe(high_gain, use_container_width=True)
+
     if st.button("💾 حفظ +5% اليوم"):
-        save_csv(HIGH_GAIN_FILE, hg)
-        st.success("تم الحفظ")
+        if not high_gain.empty:
+            safe_save(high_gain, TODAY_FILE)
+            st.success(f"تم الحفظ في {TODAY_FILE}")
+        else:
+            st.warning("لا توجد أسهم")
 
-# -------- TAB 2 --------
-with tab2:
-    pred = xgboost_predict(daily)
-    top = pred[pred["Prediction"] > 0.7].head(10)
-    st.dataframe(top, use_container_width=True)
-    if st.button("💾 حفظ تنبؤات XGBoost"):
-        save_csv(PRED_FILE, top)
-        st.success("تم الحفظ")
+# ======================
+# TAB 2
+# ======================
+with tabs[1]:
+    st.subheader("الأسهم المتوقعة +5% الغد (بدون تعلم)")
+    predicted = df[(df["RSI"] < 60) & (df["volume"] > df["volume"].median())]
 
-# -------- TAB 3 --------
-with tab3:
-    df = daily.merge(m15, on="Symbol").merge(h1, on="Symbol")
-    df["Score"] = (
-        (df["change|15"] > 0.5).astype(int) +
-        (df["change|60"] > 1).astype(int) +
-        (df["RSI|15"] > 55).astype(int) +
-        (df["RSI|60"] > 55).astype(int)
-    )
-    st.dataframe(df.sort_values("Score", ascending=False).head(10), use_container_width=True)
+    st.dataframe(predicted, use_container_width=True)
 
-# -------- TAB 4 --------
-with tab4:
-    st.dataframe(daily[daily["change"] >= 2], use_container_width=True)
+    if st.button("💾 حفظ التوقعات"):
+        safe_save(predicted, PREDICT_FILE)
+        st.success(f"تم الحفظ في {PREDICT_FILE}")
 
-# -------- TAB 5 (الجديد) --------
-with tab5:
-    st.subheader("🔮 أفضل 10 أسهم مرشحة لاختراق +5% في التداول القادم")
-    next_day = next_day_breakout_candidates(daily)
+# ======================
+# TAB 3
+# ======================
+with tabs[2]:
+    st.subheader("تحليل نتائج التوقعات")
+
+    if os.path.exists(PREDICT_FILE):
+        pred = pd.read_csv(PREDICT_FILE)
+        merged = pred.merge(df[["Symbol", "change"]], on="Symbol", how="left")
+        merged["Success"] = merged["change"] >= 5
+        merged["Date"] = datetime.today().date()
+
+        safe_save(merged, LEARN_FILE)
+        st.dataframe(merged, use_container_width=True)
+    else:
+        st.info("لا توجد بيانات تعلم")
+
+# ======================
+# TAB 4 (XGBoost)
+# ======================
+with tabs[3]:
+    st.subheader("تنبؤ ذكي باستخدام XGBoost")
+
+    if os.path.exists(LEARN_FILE):
+        data = pd.read_csv(LEARN_FILE)
+
+        features = ["RSI", "MACD", "volume", "change"]
+        data.dropna(inplace=True)
+
+        X = data[features]
+        y = data["Success"].astype(int)
+
+        if len(y.unique()) > 1:
+            model = XGBClassifier(use_label_encoder=False, eval_metric="logloss")
+            model.fit(X, y)
+
+            probs = model.predict_proba(df[features])[:, 1]
+            df["AI Probability"] = probs
+
+            st.dataframe(
+                df.sort_values("AI Probability", ascending=False).head(10),
+                use_container_width=True
+            )
+        else:
+            st.warning("البيانات غير كافية للتعلم")
+    else:
+        st.info("لا توجد قاعدة تعلم بعد")
+
+# ======================
+# TAB 5 (الجديد)
+# ======================
+with tabs[4]:
+    st.subheader("🚀 مرشحي اختراق الغد 5%")
+    next_day = next_day_breakout_candidates(df)
+
     st.dataframe(
         next_day[
-            ["Symbol","change","RSI","MACD.macd","volume","Breakout Score"]
+            ["Symbol", "Company", "change", "RSI", "MACD", "volume",
+             "Breakout Score", "Reason"]
         ],
         use_container_width=True
     )
+
     if st.button("💾 حفظ مرشحي الغد"):
-        save_csv(NEXT_DAY_FILE, next_day)
-        st.success("تم حفظ قائمة مرشحي الغد")
-
-# -------- TAB 6 --------
-with tab6:
-    st.dataframe(daily, use_container_width=True)
-
-# -------- TAB 7 --------
-with tab7:
-    st.write("📁 +5% اليوم")
-    if os.path.exists(HIGH_GAIN_FILE):
-        st.dataframe(pd.read_csv(HIGH_GAIN_FILE))
-    st.write("📁 تنبؤات XGBoost")
-    if os.path.exists(PRED_FILE):
-        st.dataframe(pd.read_csv(PRED_FILE))
-    st.write("📁 مرشحي اختراق الغد")
-    if os.path.exists(NEXT_DAY_FILE):
-        st.dataframe(pd.read_csv(NEXT_DAY_FILE))
+        safe_save(next_day, f"{DATA_DIR}/breakout_candidates.csv")
+        st.success("تم الحفظ بنجاح")
