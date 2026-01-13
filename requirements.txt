@@ -3,6 +3,7 @@ pandas
 numpy
 requests
 xgboost
-scikit-learn
 tensorflow
 yfinance
+ta
+scikit-learn
