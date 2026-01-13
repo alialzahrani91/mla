@@ -4,16 +4,14 @@ import numpy as np
 import requests
 import os
 from datetime import datetime
-import xgboost as xgb
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
 from ta.momentum import RSIIndicator
+from ta.trend import EMAIndicator, MACD
+import xgboost as xgb
 
 # ================= CONFIG =================
 st.set_page_config("AI High Gain Dashboard – KSA", layout="wide")
 HEADERS = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
 
-# إنشاء مجلد البيانات
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 HIGH_GAIN_FILE = os.path.join(DATA_DIR, "high_gain_today.csv")
@@ -87,66 +85,62 @@ def fetch_ksa():
 # ================= INDICATORS =================
 def compute_indicators(df):
     df = df.copy()
-    df["EMA20"] = df["Price"].ewm(span=20).mean()
-    df["EMA50"] = df["Price"].ewm(span=50).mean()
-    df["EMA200"] = df["Price"].ewm(span=200).mean()
-    # RSI
+    try:
+        df["EMA20"] = EMAIndicator(df["Price"], window=20).ema_indicator()
+        df["EMA50"] = EMAIndicator(df["Price"], window=50).ema_indicator()
+        df["EMA200"] = EMAIndicator(df["Price"], window=200).ema_indicator()
+    except:
+        df[["EMA20","EMA50","EMA200"]] = 0
     try:
         df["RSI"] = RSIIndicator(df["Price"]).rsi()
     except:
-        df["RSI"] = np.nan
-    df["MACD"] = df["Price"].ewm(span=12).mean() - df["Price"].ewm(span=26).mean()
-    df["ATR"] = df["Price"].rolling(14).max() - df["Price"].rolling(14).min()
+        df["RSI"] = 50
+    try:
+        df["MACD"] = MACD(df["Price"]).macd_diff()
+    except:
+        df["MACD"] = 0
     df.fillna(method="bfill", inplace=True)
     return df
 
-# ================= ML =================
-def train_xgboost(df):
-    features = ["Change %","Relative Volume","Volume","EMA20","EMA50","EMA200","RSI","MACD","ATR"]
-    df = df.copy()
-    df["Target"] = (df["Change %"].shift(-1) >= 5).astype(int)
-    df.dropna(inplace=True)
-    X = df[features]
-    y = df["Target"]
-    model = xgb.XGBClassifier(use_label_encoder=False, eval_metric='logloss')
-    model.fit(X, y)
-    df["Predicted"] = model.predict(X)
-    return df[["Symbol","Company","Predicted"]]
-
-# ================= TOP 20 NEXT DAY =================
-def top_20_next_day(df):
+# ================= SCORE & REASON =================
+def score_stocks(df):
     df = df.copy()
     reasons = []
     scores = []
-
     for _, row in df.iterrows():
-        reason_list = []
         score = 0
-        if row["EMA20"] > row["EMA50"]:
-            reason_list.append("EMA20>EMA50")
-            score += 1
-        if row["EMA20"] > row["EMA200"]:
-            reason_list.append("EMA20>EMA200")
-            score += 1
-        if 30 < row["RSI"] < 60:
-            reason_list.append("RSI متوازن")
-            score += 1
+        reason = []
+        if row["EMA20"] > row["EMA50"] > row["EMA200"]:
+            score += 3
+            reason.append("EMA صاعد")
+        if 30 < row["RSI"] < 70:
+            score += 2
+            reason.append("RSI مناسب")
         if row["MACD"] > 0:
-            reason_list.append("MACD إيجابي")
+            score += 2
+            reason.append("MACD إيجابي")
+        if row["Relative Volume"] > 1.2:
             score += 1
-        if row["Relative Volume"] > 1:
-            reason_list.append("حجم تداول أعلى من المتوسط")
-            score += 1
-
-        reasons.append(", ".join(reason_list) if reason_list else "مراقبة")
+            reason.append("حجم تداول مرتفع")
+        reasons.append(", ".join(reason))
         scores.append(score)
-
-    df["سبب الترشيح"] = reasons
     df["Score"] = scores
-    df_sorted = df.sort_values(by="Score", ascending=False).head(20)
-    return df_sorted[["Symbol","Company","Price","Change %","Relative Volume","RSI","MACD","ATR","سبب الترشيح","Score"]]
+    df["سبب الترشيح"] = reasons
+    return df
 
-# ================== STREAMLIT ==================
+# ================= TOP 20 NEXT DAY =================
+def top_20_next_day(df, timeframe="1H"):
+    df_scored = score_stocks(df)
+    df_sorted = df_scored.sort_values(by="Score", ascending=False)
+    top20 = df_sorted.head(20).copy()
+    # سعر الدخول والوقف والأهداف محسوبة حسب Timeframe (يمكن تعديل الصيغ لاحقًا)
+    top20["سعر الدخول"] = top20["Price"]
+    top20["وقف الخسارة"] = (top20["Price"] * 0.975).round(2)
+    top20["جني الأرباح"] = (top20["Price"] * 1.05).round(2)
+    top20["Timeframe"] = timeframe
+    return top20
+
+# ================= STREAMLIT =================
 st.title("🧠 AI High Gain Dashboard – KSA")
 
 df = fetch_ksa()
@@ -161,7 +155,7 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🧠 التعلم والتقييم",
     "📊 Dashboard",
     "⚡ فرص +2% غدًا",
-    "⭐ أفضل 20 سهم للغد"
+    "🔥 أفضل 20 سهم للغد"
 ])
 
 # ---------- TAB 1 ----------
@@ -173,11 +167,19 @@ with tab1:
 
 # ---------- TAB 2 ----------
 with tab2:
-    pred = train_xgboost(df)
+    features = ["Change %","Relative Volume","Volume","EMA20","EMA50","EMA200","RSI","MACD"]
+    pred_df = df.copy()
+    pred_df["Target"] = (pred_df["Change %"].shift(-1) >= 5).astype(int)
+    pred_df.dropna(inplace=True)
+    X = pred_df[features]
+    y = pred_df["Target"]
+    model = xgb.XGBClassifier(use_label_encoder=False, eval_metric='logloss')
+    model.fit(X, y)
+    pred_df["Predicted"] = model.predict(X)
     st.subheader("التنبؤ بالأسهم التي قد تحقق +5% غدًا")
-    st.dataframe(pred, use_container_width=True)
+    st.dataframe(pred_df[["Symbol","Company","Predicted"]], use_container_width=True)
     if st.button("💾 حفظ التنبؤات"):
-        safe_append(PRED_FILE, pred, subset_cols=["Symbol","Date"])
+        safe_append(PRED_FILE, pred_df[["Symbol","Company","Predicted"]], subset_cols=["Symbol","Date"])
 
 # ---------- TAB 3 ----------
 with tab3:
@@ -198,6 +200,10 @@ with tab5:
 
 # ---------- TAB 6 ----------
 with tab6:
-    top20 = top_20_next_day(df)
-    st.subheader("أفضل 20 سهم للغد بناءً على إشارات فنية")
-    st.dataframe(top20, use_container_width=True)
+    timeframe_choice = st.selectbox("اختر Timeframe للتحليل", ["15m","1H"], index=1)
+    top20 = top_20_next_day(df, timeframe=timeframe_choice)
+    st.subheader(f"أفضل 20 سهم للغد – Timeframe {timeframe_choice}")
+    st.dataframe(top20[[
+        "Symbol","Company","Price","سعر الدخول","وقف الخسارة","جني الأرباح",
+        "Score","سبب الترشيح","Timeframe"
+    ]], use_container_width=True)
