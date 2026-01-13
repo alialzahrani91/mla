@@ -3,168 +3,157 @@ import pandas as pd
 import numpy as np
 import requests
 import os
-from datetime import datetime
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
+from datetime import date
 import xgboost as xgb
 
-# Tensorflow
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
-from tensorflow.keras.callbacks import EarlyStopping
-
 # ================= CONFIG =================
-st.set_page_config("AI High Gain Dashboard – KSA", layout="wide")
+st.set_page_config("AI High Gain – KSA", layout="wide")
 HEADERS = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
 
-# إنشاء مجلد البيانات
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
-HIGH_GAIN_FILE = os.path.join(DATA_DIR, "high_gain_today.csv")
-PRED_FILE = os.path.join(DATA_DIR, "predictions.csv")
-TRAIN_FILE = os.path.join(DATA_DIR, "training.csv")
 
-# ================= HELPERS =================
-def safe_read(file):
-    if not os.path.exists(file) or os.stat(file).st_size == 0:
-        return pd.DataFrame()
-    try:
-        return pd.read_csv(file)
-    except pd.errors.EmptyDataError:
-        return pd.DataFrame()
+HIGH_GAIN_FILE = f"{DATA_DIR}/high_gain_today.csv"
+PRED_FILE = f"{DATA_DIR}/predictions.csv"
 
-def safe_append(file, df, subset_cols=None):
+# ================= UTILS =================
+def save_csv(file, df):
     if df.empty:
         return
-    df_to_save = df.copy()
-    df_to_save["Date"] = pd.to_datetime("today").date()
-    if os.path.exists(file) and os.stat(file).st_size > 0:
-        try:
-            existing = pd.read_csv(file)
-            if subset_cols:
-                df_to_save = pd.concat([existing, df_to_save]).drop_duplicates(subset=subset_cols)
-            else:
-                df_to_save = pd.concat([existing, df_to_save]).drop_duplicates()
-        except pd.errors.EmptyDataError:
-            pass
-    df_to_save.to_csv(file, index=False)
-    st.success(f"تم حفظ {len(df_to_save)} سهم في {file}")
+    df["Date"] = date.today()
+    if os.path.exists(file):
+        old = pd.read_csv(file)
+        df = pd.concat([old, df]).drop_duplicates(subset=["Symbol","Date"])
+    df.to_csv(file, index=False)
+
+def safe_float(v):
+    try: return float(v)
+    except: return 0.0
 
 # ================= TRADINGVIEW =================
-def fetch_ksa():
+def scan_tv(columns, sort_col):
     url = "https://scanner.tradingview.com/ksa/scan"
     payload = {
         "filter": [
-            {"left": "exchange", "operation": "equal", "right": "TADAWUL"},
-            {"left": "type", "operation": "equal", "right": "stock"}
+            {"left":"exchange","operation":"equal","right":"TADAWUL"},
+            {"left":"type","operation":"equal","right":"stock"}
         ],
-        "columns": [
-            "name", "description", "close", "change",
-            "relative_volume_10d_calc", "volume", "market_cap_basic"
-        ],
-        "sort": {"sortBy": "change", "sortOrder": "desc"},
-        "range": [0, 400]
+        "columns": columns,
+        "sort":{"sortBy":sort_col,"sortOrder":"desc"},
+        "range":[0,500]
     }
-    try:
-        r = requests.post(url, json=payload, headers=HEADERS, timeout=20)
-        r.raise_for_status()
-        data = r.json().get("data", [])
-    except Exception as e:
-        st.error(f"⚠️ خطأ في جلب البيانات: {e}")
-        return pd.DataFrame()
-    rows = []
+    r = requests.post(url, json=payload, headers=HEADERS, timeout=20)
+    data = r.json().get("data",[])
+    rows=[]
     for d in data:
-        try:
-            rows.append({
-                "Symbol": d.get("s",""),
-                "Company": str(d["d"][1]) if len(d["d"])>1 else "",
-                "Price": float(d["d"][2]) if len(d["d"])>2 and d["d"][2] else 0.0,
-                "Change %": float(d["d"][3]) if len(d["d"])>3 and d["d"][3] else 0.0,
-                "Relative Volume": float(d["d"][4]) if len(d["d"])>4 and d["d"][4] else 0.0,
-                "Volume": float(d["d"][5]) if len(d["d"])>5 and d["d"][5] else 0.0,
-                "Market Cap": float(d["d"][6]) if len(d["d"])>6 and d["d"][6] else 0.0
-            })
-        except:
-            continue
+        rows.append({
+            "Symbol": d["s"],
+            **{columns[i]: safe_float(d["d"][i]) for i in range(len(columns))}
+        })
     return pd.DataFrame(rows)
 
-# ================= INDICATORS =================
-def compute_indicators(df):
-    df = df.copy()
-    df["EMA20"] = df["Price"].ewm(span=20).mean()
-    df["EMA50"] = df["Price"].ewm(span=50).mean()
-    df["EMA200"] = df["Price"].ewm(span=200).mean()
-    delta = df["Price"].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
-    rs = avg_gain / avg_loss
-    df["RSI"] = 100 - (100 / (1 + rs))
-    df["MACD"] = df["Price"].ewm(span=12).mean() - df["Price"].ewm(span=26).mean()
-    df["ATR"] = df["Price"].rolling(14).max() - df["Price"].rolling(14).min()
-    df.fillna(method="bfill", inplace=True)
-    return df
+# ================= DATA =================
+def fetch_daily():
+    return scan_tv(
+        ["close","change","volume","RSI","MACD.macd"],
+        "change"
+    )
+
+def fetch_15m():
+    return scan_tv(
+        ["close","change|15","RSI|15","MACD.macd|15"],
+        "change|15"
+    )
+
+def fetch_1h():
+    return scan_tv(
+        ["close","change|60","RSI|60","MACD.macd|60"],
+        "change|60"
+    )
 
 # ================= ML =================
-def train_xgboost(df):
-    features = ["Change %","Relative Volume","Volume","EMA20","EMA50","EMA200","RSI","MACD","ATR"]
+def xgboost_predict(df):
     df = df.copy()
-    df["Target"] = (df["Change %"].shift(-1) >= 5).astype(int)
-    df.dropna(inplace=True)
+    df["Target"] = (df["change"] >= 5).astype(int)
+    features = ["change","volume","RSI","MACD.macd"]
     X = df[features]
     y = df["Target"]
-    model = xgb.XGBClassifier(use_label_encoder=False, eval_metric='logloss')
+
+    model = xgb.XGBClassifier(eval_metric="logloss")
     model.fit(X, y)
-    df["Predicted"] = model.predict(X)
-    return df[["Symbol","Predicted"]]
+    df["Prediction"] = model.predict_proba(X)[:,1]
+    return df.sort_values("Prediction", ascending=False)
 
-# ================== STREAMLIT ==================
-st.title("🧠 AI High Gain Dashboard – KSA")
+# ================= MULTI TF =================
+def multi_tf(d, m15, h1):
+    df = d.merge(m15, on="Symbol").merge(h1, on="Symbol")
+    df["Score"] = 0
 
-df = fetch_ksa()
-if df.empty:
-    st.stop()
+    df.loc[df["change|15"] > 0.5, "Score"] += 1
+    df.loc[df["change|60"] > 1.0, "Score"] += 1
+    df.loc[df["change"] > 1.5, "Score"] += 1
 
-df = compute_indicators(df)
+    df.loc[df["RSI|15"] > 55, "Score"] += 1
+    df.loc[df["RSI|60"] > 55, "Score"] += 1
+    df.loc[df["RSI"] > 50, "Score"] += 1
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    df.loc[df["MACD.macd|15"] > 0, "Score"] += 1
+    df.loc[df["MACD.macd|60"] > 0, "Score"] += 1
+    df.loc[df["MACD.macd"] > 0, "Score"] += 1
+
+    return df.sort_values("Score", ascending=False)
+
+# ================= UI =================
+st.title("🧠 AI High Gain Dashboard – Saudi Market")
+
+daily = fetch_daily()
+m15 = fetch_15m()
+h1 = fetch_1h()
+
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "📈 +5% اليوم",
-    "🔮 تنبؤ الغد (Ensemble)",
-    "🧠 التعلم والتقييم",
-    "📊 Dashboard",
-    "⚡ فرص +2% غدًا"
+    "🔮 XGBoost تنبؤ",
+    "⏱️ Multi-Timeframe",
+    "⚡ فرص +2%",
+    "📊 السوق كامل",
+    "💾 الملفات"
 ])
 
-# ---------- TAB 1 ----------
+# -------- TAB 1 --------
 with tab1:
-    high_gain = df[df["Change %"] >= 5].copy()
-    st.dataframe(high_gain, use_container_width=True)
-    if st.button("💾 حفظ +5% اليوم"):
-        safe_append(HIGH_GAIN_FILE, high_gain, subset_cols=["Symbol","Date"])
+    hg = daily[daily["change"] >= 5]
+    st.dataframe(hg)
+    if st.button("💾 حفظ"):
+        save_csv(HIGH_GAIN_FILE, hg)
+        st.success("تم الحفظ")
 
-# ---------- TAB 2 ----------
+# -------- TAB 2 --------
 with tab2:
-    pred = train_xgboost(df)
-    st.subheader("التنبؤ بالأسهم التي قد تحقق +5% غدًا")
-    st.dataframe(pred, use_container_width=True)
+    pred = xgboost_predict(daily)
+    top = pred[pred["Prediction"] > 0.7].head(10)
+    st.dataframe(top)
     if st.button("💾 حفظ التنبؤات"):
-        safe_append(PRED_FILE, pred, subset_cols=["Symbol","Date"])
+        save_csv(PRED_FILE, top)
+        st.success("تم الحفظ")
 
-# ---------- TAB 3 ----------
+# -------- TAB 3 --------
 with tab3:
-    st.subheader("تقييم التعلم")
-    training_data = safe_read(TRAIN_FILE)
-    st.dataframe(training_data, use_container_width=True)
+    mtf = multi_tf(daily, m15, h1).head(10)
+    st.dataframe(mtf[[
+        "Symbol","change","change|15","change|60","RSI","RSI|15","RSI|60","Score"
+    ]])
 
-# ---------- TAB 4 ----------
+# -------- TAB 4 --------
 with tab4:
-    st.subheader("Dashboard")
-    st.dataframe(df, use_container_width=True)
+    st.dataframe(daily[daily["change"] >= 2])
 
-# ---------- TAB 5 ----------
+# -------- TAB 5 --------
 with tab5:
-    potential = df[df["Change %"] >= 2].copy()
-    st.subheader("فرص +2% تحليل مباشر")
-    st.dataframe(potential, use_container_width=True)
+    st.dataframe(daily)
+
+# -------- TAB 6 --------
+with tab6:
+    st.write("📁 High Gain File")
+    st.dataframe(pd.read_csv(HIGH_GAIN_FILE) if os.path.exists(HIGH_GAIN_FILE) else [])
+    st.write("📁 Predictions File")
+    st.dataframe(pd.read_csv(PRED_FILE) if os.path.exists(PRED_FILE) else [])
