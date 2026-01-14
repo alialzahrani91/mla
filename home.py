@@ -6,35 +6,27 @@ import os
 
 # ================= CONFIG =================
 st.set_page_config("AI KSA Trading Dashboard", layout="wide")
-SYMBOLS_FILE = "tadawul_symbols.csv"
+TV_FILE = "tradingview_symbols.csv"  # ملف بيانات TradingView
 
-# ================= LOAD SYMBOLS =================
+# ================= LOAD TRADINGVIEW DATA =================
 @st.cache_data
-def load_symbols():
-    if not os.path.exists(SYMBOLS_FILE):
+def load_tradingview():
+    if not os.path.exists(TV_FILE):
         return pd.DataFrame()
-    df = pd.read_csv(SYMBOLS_FILE)
-    required = {"Symbol", "Yahoo"}
-    if not required.issubset(df.columns):
-        return pd.DataFrame()
+    # ملف بسيط بدون Header
+    df = pd.read_csv(TV_FILE, names=["Symbol", "Company", "TV_Close"])
     return df
 
-symbols_df = load_symbols()
-if symbols_df.empty:
-    st.error("❌ ملف tadawul_symbols.csv غير صحيح")
+tv_df = load_tradingview()
+if tv_df.empty:
+    st.error("❌ ملف tradingview_symbols.csv غير موجود أو فارغ")
     st.stop()
 
 # ================= FETCH YAHOO DATA =================
 @st.cache_data(ttl=3600)
-def fetch_yahoo_full(yahoo_symbol):
+def fetch_yahoo_full(symbol):
     try:
-        df = yf.download(
-            yahoo_symbol,
-            period="6mo",
-            interval="1d",
-            progress=False
-        )
-
+        df = yf.download(symbol, period="6mo", interval="1d", progress=False)
         if df.empty or len(df) < 50:
             raise Exception
 
@@ -65,7 +57,6 @@ def fetch_yahoo_full(yahoo_symbol):
             "RSI": round(rsi.iloc[-1], 2),
             "Volatility": round(volatility.iloc[-1], 2),
         }
-
     except Exception:
         return {
             "Close": np.nan,
@@ -80,13 +71,14 @@ def fetch_yahoo_full(yahoo_symbol):
 
 # ================= BUILD DATA =================
 rows = []
-with st.spinner("🔄 جلب بيانات السوق..."):
-    for _, r in symbols_df.iterrows():
-        data = fetch_yahoo_full(r["Yahoo"])
+with st.spinner("🔄 جلب بيانات السوق من Yahoo وTradingView..."):
+    for _, r in tv_df.iterrows():
+        yahoo_data = fetch_yahoo_full(r["Symbol"])
         rows.append({
             "Symbol": r["Symbol"],
-            "Company": r.get("Company", ""),
-            **data
+            "Company": r["Company"],      # من TradingView
+            "TV_Close": r["TV_Close"],    # من TradingView
+            **yahoo_data                  # بيانات Yahoo
         })
 
 df_all = pd.DataFrame(rows)
@@ -94,14 +86,12 @@ df_all = pd.DataFrame(rows)
 # ================= SCORE ENGINE DYNAMIC =================
 st.sidebar.header("⚙️ إعدادات Scoring")
 
-# إعدادات ديناميكية من الشريط الجانبي
 change_pct_threshold = st.sidebar.number_input("Change % minimum", value=2.0, step=0.1)
 volume_multiplier = st.sidebar.number_input("Volume > Avg20 multiplier", value=1.0, step=0.1)
 rsi_min = st.sidebar.number_input("RSI Min", value=45)
 rsi_max = st.sidebar.number_input("RSI Max", value=68)
 volatility_max = st.sidebar.number_input("Max Volatility %", value=2.5)
 
-# تأكد أن الأعمدة رقمية لتجنب الأخطاء
 numeric_cols = ["Change %", "Volume", "VolumeAvg20", "Close", "EMA20", "EMA50", "RSI", "Volatility"]
 for col in numeric_cols:
     if col in df_all.columns:
@@ -146,7 +136,6 @@ def score_stock_dynamic(row):
 
     return score, " + ".join(reasons)
 
-# تطبيق الدالة
 scores = df_all.apply(score_stock_dynamic, axis=1)
 df_all["Score"] = scores.apply(lambda x: x[0])
 df_all["Reasons"] = scores.apply(lambda x: x[1])
