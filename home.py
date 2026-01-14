@@ -2,157 +2,164 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from datetime import datetime
-
 from ta.trend import EMAIndicator, MACD
 from ta.momentum import RSIIndicator
+import os
 
 # ================= CONFIG =================
-st.set_page_config("AI High Gain Dashboard – KSA", layout="wide")
+st.set_page_config("AI KSA Trading Dashboard", layout="wide")
 
-symbols_file = "tadawul_symbols.csv"
-symbols_df = pd.read_csv(symbols_file)
+SYMBOLS_FILE = "tadawul_symbols.csv"
 
-symbols = symbols_df["Symbol"].dropna().unique().tolist()
-
-# ================= DATA =================
-@st.cache_data(ttl=3600)
-def fetch_data(symbol):
-    df = yf.download(symbol, period="6mo", interval="1d", progress=False)
-
-    if df.empty or len(df) < 60:
-        return None
-
-    close = df["Close"]
-
-    if isinstance(close, pd.DataFrame):
-        close = close.iloc[:, 0]
-
-    close = close.astype(float)
-
-    df["EMA20"] = EMAIndicator(close, 20).ema_indicator()
-    df["EMA50"] = EMAIndicator(close, 50).ema_indicator()
-    df["EMA200"] = EMAIndicator(close, 200).ema_indicator()
-
-    df["RSI"] = RSIIndicator(close, 14).rsi()
-
-    macd = MACD(close)
-    df["MACD"] = macd.macd_diff()
-
-    df["AvgVolume10"] = df["Volume"].rolling(10).mean()
-
-    df.dropna(inplace=True)
+# ================= LOAD SYMBOLS =================
+@st.cache_data
+def load_symbols():
+    if not os.path.exists(SYMBOLS_FILE):
+        return pd.DataFrame()
+    df = pd.read_csv(SYMBOLS_FILE)
+    if "Symbol" not in df.columns:
+        return pd.DataFrame()
     return df
 
+symbols_df = load_symbols()
+if symbols_df.empty:
+    st.error("❌ ملف symbols غير موجود أو العمود Symbol مفقود")
+    st.stop()
+
+# ================= FETCH DATA =================
+@st.cache_data(ttl=3600)
+def fetch_data(symbol):
+    try:
+        df = yf.download(symbol, period="9mo", interval="1d", progress=False)
+        if df is None or df.empty or "Close" not in df:
+            return None
+
+        close = df["Close"]
+
+        if close.ndim != 1 or len(close) < 200:
+            return None
+
+        df["EMA20"] = EMAIndicator(close, 20).ema_indicator()
+        df["EMA50"] = EMAIndicator(close, 50).ema_indicator()
+        df["EMA200"] = EMAIndicator(close, 200).ema_indicator()
+        df["RSI"] = RSIIndicator(close, 14).rsi()
+
+        macd = MACD(close)
+        df["MACD"] = macd.macd_diff()
+
+        df["VolumeAvg20"] = df["Volume"].rolling(20).mean()
+
+        df.dropna(inplace=True)
+        if len(df) < 5:
+            return None
+
+        return df
+
+    except Exception:
+        return None
 
 # ================= ANALYSIS =================
-rows = []
-
-for sym in symbols:
-    df = fetch_data(sym)
-    if df is None:
-        continue
+def analyze_stock(symbol, company):
+    df = fetch_data(symbol)
+    if df is None or df.empty or len(df) < 2:
+        return None
 
     last = df.iloc[-1]
-    prev10 = df.tail(10)
 
     score = 0
     reasons = []
 
+    # Trend
     if last["EMA20"] > last["EMA50"]:
-        score += 20; reasons.append("EMA20 > EMA50")
+        score += 20
+        reasons.append("EMA20 > EMA50")
     if last["EMA50"] > last["EMA200"]:
-        score += 20; reasons.append("EMA50 > EMA200")
+        score += 20
+        reasons.append("EMA50 > EMA200")
 
-    if 50 <= last["RSI"] <= 65:
-        score += 15; reasons.append("RSI صحي")
+    # Momentum
+    if 50 <= last["RSI"] <= 68:
+        score += 15
+        reasons.append("RSI صحي")
 
     if last["MACD"] > 0:
-        score += 15; reasons.append("MACD إيجابي")
+        score += 15
+        reasons.append("MACD إيجابي")
 
-    if last["Volume"] > last["AvgVolume10"]:
-        score += 15; reasons.append("سيولة أعلى من المتوسط")
+    # Volume
+    if last["Volume"] > last["VolumeAvg20"] * 1.3:
+        score += 20
+        reasons.append("سيولة مفاجئة")
 
-    green = (prev10["Close"].pct_change() > 0).sum()
-    if green >= 6:
-        score += 15; reasons.append("تجميع 10 شموع")
+    # Entry / SL / Targets
+    entry = round(last["Close"], 2)
+    stop = round(entry * 0.96, 2)
+    target1 = round(entry * 1.05, 2)
+    target2 = round(entry * 1.10, 2)
 
-    rows.append({
-        "Symbol": sym,
-        "Price": round(last["Close"], 2),
+    return {
+        "Symbol": symbol,
+        "Company": company,
+        "Close": round(last["Close"], 2),
         "EMA20": round(last["EMA20"], 2),
         "EMA50": round(last["EMA50"], 2),
         "EMA200": round(last["EMA200"], 2),
         "RSI": round(last["RSI"], 2),
         "MACD": round(last["MACD"], 4),
-        "Volume": int(last["Volume"]),
-        "AvgVolume10": int(last["AvgVolume10"]),
-        "NextDayScore": score,
-        "سبب الترشيح": " + ".join(reasons)
-    })
-
-df_all = pd.DataFrame(rows)
-
-# ================= STRONG SETUPS =================
-def trade_setup(row):
-    if not (
-        row["EMA20"] > row["EMA50"] and
-        row["EMA50"] > row["EMA200"] and
-        row["MACD"] > 0 and
-        50 <= row["RSI"] <= 65 and
-        row["Volume"] > row["AvgVolume10"]
-    ):
-        return None
-
-    entry = row["Price"]
-    stop = row["EMA20"]
-
-    return pd.Series({
+        "Score": score,
+        "Reasons": " + ".join(reasons),
         "Entry": entry,
-        "Stop Loss": round(stop, 2),
-        "Target 1": round(entry * 1.05, 2),
-        "Target 2": round(entry * 1.10, 2)
-    })
+        "Stop": stop,
+        "Target 1": target1,
+        "Target 2": target2
+    }
 
-setups = df_all.apply(trade_setup, axis=1)
-strong_df = pd.concat([df_all, setups], axis=1).dropna(subset=["Entry"])
+# ================= RUN ANALYSIS =================
+results = []
+
+with st.spinner("🔍 تحليل الأسهم..."):
+    for _, r in symbols_df.iterrows():
+        res = analyze_stock(r["Symbol"], r.get("Company", ""))
+        if res:
+            results.append(res)
+
+df_all = pd.DataFrame(results)
 
 # ================= UI =================
-st.title("🧠 AI High Gain Dashboard – KSA")
+st.title("📈 AI KSA Trading Dashboard")
 
 tab1, tab2, tab3 = st.tabs([
-    "🔥 أفضل 20 سهم للغد",
-    "💎 فرص قوية (دخول / وقف / أهداف)",
-    "📊 السوق كامل"
+    "📊 السوق كامل",
+    "🔥 أفضل فرص قوية",
+    "🎯 فرصة قوية (دخول/وقف/أهداف)"
 ])
 
 # ---------- TAB 1 ----------
 with tab1:
-    top20 = df_all.sort_values("NextDayScore", ascending=False).head(20)
-    st.dataframe(
-        top20[
-            [
-                "Symbol","Price","EMA20","EMA50","EMA200",
-                "RSI","MACD","NextDayScore","سبب الترشيح"
-            ]
-        ],
-        use_container_width=True
-    )
+    st.dataframe(df_all, use_container_width=True)
 
 # ---------- TAB 2 ----------
 with tab2:
-    st.subheader("فرص قوية مكتملة فنيًا")
+    top = df_all.sort_values("Score", ascending=False).head(20)
+    st.subheader("أفضل 20 سهم محتمل للغد")
     st.dataframe(
-        strong_df[
-            [
-                "Symbol","Price",
-                "Entry","Stop Loss","Target 1","Target 2",
-                "RSI","MACD","NextDayScore","سبب الترشيح"
-            ]
-        ].sort_values("NextDayScore", ascending=False),
+        top[[
+            "Symbol","Company","Close",
+            "EMA20","EMA50","EMA200",
+            "RSI","MACD","Score","Reasons"
+        ]],
         use_container_width=True
     )
 
 # ---------- TAB 3 ----------
 with tab3:
-    st.dataframe(df_all, use_container_width=True)
+    strong = df_all[df_all["Score"] >= 70].sort_values("Score", ascending=False)
+    st.subheader("فرص قوية مكتملة فنياً")
+    st.dataframe(
+        strong[[
+            "Symbol","Company",
+            "Entry","Stop","Target 1","Target 2",
+            "Score","Reasons"
+        ]],
+        use_container_width=True
+    )
