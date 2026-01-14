@@ -6,7 +6,7 @@ import os
 
 # ================= CONFIG =================
 st.set_page_config("AI KSA Trading Dashboard", layout="wide")
-TV_FILE = "tradingview_symbols.csv"  # ملف بيانات TradingView
+TV_FILE = "tadawul_symbols.csv"  # ملف بيانات TradingView
 
 # ================= LOAD TRADINGVIEW DATA =================
 @st.cache_data
