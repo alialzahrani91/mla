@@ -27,7 +27,7 @@ if symbols_df.empty:
     st.stop()
 
 # ================= FETCH DATA =================
-@st.cache_data(ttl=86400)  # تحديث مرة كل 24 ساعة
+
 def fetch_data(symbol):
     try:
         df = yf.download(symbol, period="9mo", interval="1d", progress=False)
