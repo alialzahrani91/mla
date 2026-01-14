@@ -4,206 +4,198 @@ import numpy as np
 import requests
 import os
 from datetime import datetime
+import yfinance as yf
+
 from ta.momentum import RSIIndicator
 from ta.trend import EMAIndicator, MACD
-import xgboost as xgb
 
 # ================= CONFIG =================
 st.set_page_config("AI High Gain Dashboard – KSA", layout="wide")
+
 HEADERS = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
 
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
-HIGH_GAIN_FILE = os.path.join(DATA_DIR, "high_gain_today.csv")
-PRED_FILE = os.path.join(DATA_DIR, "predictions.csv")
-TRAIN_FILE = os.path.join(DATA_DIR, "training.csv")
+
+HIGH_GAIN_FILE = f"{DATA_DIR}/high_gain_today.csv"
 
 # ================= HELPERS =================
-def safe_read(file):
-    if not os.path.exists(file) or os.stat(file).st_size == 0:
-        return pd.DataFrame()
-    try:
-        return pd.read_csv(file)
-    except pd.errors.EmptyDataError:
-        return pd.DataFrame()
-
-def safe_append(file, df, subset_cols=None):
+def safe_save(file, df):
     if df.empty:
         return
-    df_to_save = df.copy()
-    df_to_save["Date"] = pd.to_datetime("today").date()
-    if os.path.exists(file) and os.stat(file).st_size > 0:
-        try:
-            existing = pd.read_csv(file)
-            if subset_cols:
-                df_to_save = pd.concat([existing, df_to_save]).drop_duplicates(subset=subset_cols)
-            else:
-                df_to_save = pd.concat([existing, df_to_save]).drop_duplicates()
-        except pd.errors.EmptyDataError:
-            pass
-    df_to_save.to_csv(file, index=False)
-    st.success(f"تم حفظ {len(df_to_save)} سهم في {file}")
+    df["Date"] = datetime.today().date()
+    if os.path.exists(file):
+        old = pd.read_csv(file)
+        df = pd.concat([old, df]).drop_duplicates(subset=["Symbol", "Date"])
+    df.to_csv(file, index=False)
+    st.success(f"تم الحفظ في {file}")
 
 # ================= TRADINGVIEW =================
+@st.cache_data(ttl=600)
 def fetch_ksa():
     url = "https://scanner.tradingview.com/ksa/scan"
     payload = {
         "filter": [
-            {"left": "exchange", "operation": "equal", "right": "TADAWUL"},
             {"left": "type", "operation": "equal", "right": "stock"}
         ],
         "columns": [
             "name", "description", "close", "change",
-            "relative_volume_10d_calc", "volume", "market_cap_basic"
+            "relative_volume_10d_calc", "volume"
         ],
         "sort": {"sortBy": "change", "sortOrder": "desc"},
         "range": [0, 400]
     }
-    try:
-        r = requests.post(url, json=payload, headers=HEADERS, timeout=20)
-        r.raise_for_status()
-        data = r.json().get("data", [])
-    except Exception as e:
-        st.error(f"⚠️ خطأ في جلب البيانات: {e}")
-        return pd.DataFrame()
+
+    r = requests.post(url, json=payload, headers=HEADERS, timeout=20)
+    data = r.json().get("data", [])
+
     rows = []
     for d in data:
         try:
             rows.append({
-                "Symbol": d.get("s",""),
-                "Company": str(d["d"][1]) if len(d["d"])>1 else "",
-                "Price": float(d["d"][2]) if len(d["d"])>2 and d["d"][2] else 0.0,
-                "Change %": float(d["d"][3]) if len(d["d"])>3 and d["d"][3] else 0.0,
-                "Relative Volume": float(d["d"][4]) if len(d["d"])>4 and d["d"][4] else 0.0,
-                "Volume": float(d["d"][5]) if len(d["d"])>5 and d["d"][5] else 0.0,
-                "Market Cap": float(d["d"][6]) if len(d["d"])>6 and d["d"][6] else 0.0
+                "Symbol": d["s"],
+                "Company": d["d"][1],
+                "Price": float(d["d"][2]),
+                "Change %": float(d["d"][3]),
+                "Relative Volume": float(d["d"][4]) if d["d"][4] else 0,
+                "Volume": float(d["d"][5]) if d["d"][5] else 0
             })
         except:
-            continue
+            pass
+
     return pd.DataFrame(rows)
 
 # ================= INDICATORS =================
 def compute_indicators(df):
     df = df.copy()
-    try:
-        df["EMA20"] = EMAIndicator(df["Price"], window=20).ema_indicator()
-        df["EMA50"] = EMAIndicator(df["Price"], window=50).ema_indicator()
-        df["EMA200"] = EMAIndicator(df["Price"], window=200).ema_indicator()
-    except:
-        df[["EMA20","EMA50","EMA200"]] = 0
-    try:
-        df["RSI"] = RSIIndicator(df["Price"]).rsi()
-    except:
-        df["RSI"] = 50
-    try:
-        df["MACD"] = MACD(df["Price"]).macd_diff()
-    except:
-        df["MACD"] = 0
+
+    df["EMA20"] = EMAIndicator(df["Price"], 20).ema_indicator()
+    df["EMA50"] = EMAIndicator(df["Price"], 50).ema_indicator()
+    df["EMA200"] = EMAIndicator(df["Price"], 200).ema_indicator()
+
+    df["RSI"] = RSIIndicator(df["Price"], 14).rsi()
+
+    macd = MACD(df["Price"])
+    df["MACD"] = macd.macd_diff()
+
     df.fillna(method="bfill", inplace=True)
     return df
 
-# ================= SCORE & REASON =================
-def score_stocks(df):
-    df = df.copy()
+# ================= LAST 10 DAYS =================
+def last_10_days(symbol):
+    try:
+        s = symbol.replace("TADAWUL:", "") + ".SR"
+        hist = yf.Ticker(s).history(period="15d")
+        if len(hist) < 10:
+            return None
+        last10 = hist.tail(10)
+        last10["Change %"] = last10["Close"].pct_change() * 100
+        return last10
+    except:
+        return None
+
+# ================= NEXT DAY SCORE =================
+def next_day_score(row, last10=None):
+    score = 0
     reasons = []
-    scores = []
-    for _, row in df.iterrows():
-        score = 0
-        reason = []
-        if row["EMA20"] > row["EMA50"] > row["EMA200"]:
-            score += 3
-            reason.append("EMA صاعد")
-        if 30 < row["RSI"] < 70:
-            score += 2
-            reason.append("RSI مناسب")
-        if row["MACD"] > 0:
-            score += 2
-            reason.append("MACD إيجابي")
-        if row["Relative Volume"] > 1.2:
-            score += 1
-            reason.append("حجم تداول مرتفع")
-        reasons.append(", ".join(reason))
-        scores.append(score)
-    df["Score"] = scores
-    df["سبب الترشيح"] = reasons
-    return df
 
-# ================= TOP 20 NEXT DAY =================
-def top_20_next_day(df, timeframe="1H"):
-    df_scored = score_stocks(df)
-    df_sorted = df_scored.sort_values(by="Score", ascending=False)
-    top20 = df_sorted.head(20).copy()
-    # سعر الدخول والوقف والأهداف محسوبة حسب Timeframe (يمكن تعديل الصيغ لاحقًا)
-    top20["سعر الدخول"] = top20["Price"]
-    top20["وقف الخسارة"] = (top20["Price"] * 0.975).round(2)
-    top20["جني الأرباح"] = (top20["Price"] * 1.05).round(2)
-    top20["Timeframe"] = timeframe
-    return top20
+    # Trend
+    if row["EMA20"] > row["EMA50"]:
+        score += 15; reasons.append("EMA20 > EMA50")
+    if row["EMA50"] > row["EMA200"]:
+        score += 15; reasons.append("EMA50 > EMA200")
 
-# ================= STREAMLIT =================
+    # Momentum
+    if 50 <= row["RSI"] <= 68:
+        score += 15; reasons.append("RSI صحي")
+    if row["MACD"] > 0:
+        score += 10; reasons.append("MACD إيجابي")
+
+    # Volume
+    if row["Relative Volume"] > 1.3:
+        score += 15; reasons.append("سيولة مرتفعة")
+
+    # Price Action
+    if row["Price"] > row["EMA20"]:
+        score += 10; reasons.append("إغلاق فوق EMA20")
+
+    if last10 is not None:
+        green = (last10["Change %"] > 0).sum()
+        if green >= 6:
+            score += 10; reasons.append("تجميع 10 أيام")
+
+    # Risk
+    if row["RSI"] > 72:
+        score -= 20; reasons.append("تشبع شراء")
+
+    return max(score, 0), " + ".join(reasons)
+
+# ================= UI =================
 st.title("🧠 AI High Gain Dashboard – KSA")
 
 df = fetch_ksa()
-if df.empty:
-    st.stop()
-
 df = compute_indicators(df)
 
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "📈 +5% اليوم",
-    "🔮 تنبؤ الغد (Ensemble)",
-    "🧠 التعلم والتقييم",
-    "📊 Dashboard",
+    "🔥 أفضل 20 سهم للغد",
+    "📉 تحليل 10 إغلاقات",
+    "📊 السوق كامل",
     "⚡ فرص +2% غدًا",
-    "🔥 أفضل 20 سهم للغد"
+    "🧠 Score ذكي"
 ])
 
 # ---------- TAB 1 ----------
 with tab1:
-    high_gain = df[df["Change %"] >= 5].copy()
+    high_gain = df[df["Change %"] >= 5]
     st.dataframe(high_gain, use_container_width=True)
     if st.button("💾 حفظ +5% اليوم"):
-        safe_append(HIGH_GAIN_FILE, high_gain, subset_cols=["Symbol","Date"])
+        safe_save(HIGH_GAIN_FILE, high_gain)
 
 # ---------- TAB 2 ----------
 with tab2:
-    features = ["Change %","Relative Volume","Volume","EMA20","EMA50","EMA200","RSI","MACD"]
-    pred_df = df.copy()
-    pred_df["Target"] = (pred_df["Change %"].shift(-1) >= 5).astype(int)
-    pred_df.dropna(inplace=True)
-    X = pred_df[features]
-    y = pred_df["Target"]
-    model = xgb.XGBClassifier(use_label_encoder=False, eval_metric='logloss')
-    model.fit(X, y)
-    pred_df["Predicted"] = model.predict(X)
-    st.subheader("التنبؤ بالأسهم التي قد تحقق +5% غدًا")
-    st.dataframe(pred_df[["Symbol","Company","Predicted"]], use_container_width=True)
-    if st.button("💾 حفظ التنبؤات"):
-        safe_append(PRED_FILE, pred_df[["Symbol","Company","Predicted"]], subset_cols=["Symbol","Date"])
+    scores = []
+    reasons = []
+
+    for _, r in df.iterrows():
+        l10 = last_10_days(r["Symbol"])
+        s, reason = next_day_score(r, l10)
+        scores.append(s)
+        reasons.append(reason)
+
+    df["NextDayScore"] = scores
+    df["سبب الترشيح"] = reasons
+
+    top20 = df.sort_values("NextDayScore", ascending=False).head(20)
+
+    st.subheader("أفضل 20 سهم مرشح للغد (+5%)")
+    st.dataframe(
+        top20[[
+            "Symbol","Company","Price","NextDayScore",
+            "RSI","MACD","Relative Volume","سبب الترشيح"
+        ]],
+        use_container_width=True
+    )
 
 # ---------- TAB 3 ----------
 with tab3:
-    st.subheader("تقييم التعلم")
-    training_data = safe_read(TRAIN_FILE)
-    st.dataframe(training_data, use_container_width=True)
+    for _, r in high_gain.iterrows():
+        st.markdown(f"### {r['Symbol']} – {r['Company']}")
+        l10 = last_10_days(r["Symbol"])
+        if l10 is not None:
+            view = l10[["Close"]].copy()
+            view["Change %"] = l10["Close"].pct_change() * 100
+            st.dataframe(view, use_container_width=True)
 
 # ---------- TAB 4 ----------
 with tab4:
-    st.subheader("Dashboard")
     st.dataframe(df, use_container_width=True)
 
 # ---------- TAB 5 ----------
 with tab5:
-    potential = df[df["Change %"] >= 2].copy()
-    st.subheader("فرص +2% تحليل مباشر")
-    st.dataframe(potential, use_container_width=True)
+    st.dataframe(df[df["Change %"] >= 2], use_container_width=True)
 
 # ---------- TAB 6 ----------
 with tab6:
-    timeframe_choice = st.selectbox("اختر Timeframe للتحليل", ["15m","1H"], index=1)
-    top20 = top_20_next_day(df, timeframe=timeframe_choice)
-    st.subheader(f"أفضل 20 سهم للغد – Timeframe {timeframe_choice}")
-    st.dataframe(top20[[
-        "Symbol","Company","Price","سعر الدخول","وقف الخسارة","جني الأرباح",
-        "Score","سبب الترشيح","Timeframe"
-    ]], use_container_width=True)
+    st.metric("عدد الأسهم المحللة", len(df))
+    st.metric("أفضل Score", df["NextDayScore"].max())
