@@ -11,6 +11,7 @@ from ta.trend import EMAIndicator, MACD
 
 # ================= CONFIG =================
 st.set_page_config("AI High Gain Dashboard – KSA", layout="wide")
+
 HEADERS = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
 
 DATA_DIR = "data"
@@ -34,19 +35,19 @@ def safe_save(file, df):
 def fetch_ksa():
     url = "https://scanner.tradingview.com/ksa/scan"
     payload = {
-        "filter": [
-            {"left": "type", "operation": "equal", "right": "stock"}
-        ],
-        "columns": [
-            "name", "description", "close", "change",
-            "relative_volume_10d_calc", "volume"
-        ],
+        "filter": [{"left": "type", "operation": "equal", "right": "stock"}],
+        "columns": ["name", "description", "close", "change",
+                    "relative_volume_10d_calc", "volume"],
         "sort": {"sortBy": "change", "sortOrder": "desc"},
         "range": [0, 400]
     }
 
-    r = requests.post(url, json=payload, headers=HEADERS, timeout=20)
-    data = r.json().get("data", [])
+    try:
+        r = requests.post(url, json=payload, headers=HEADERS, timeout=20)
+        data = r.json().get("data", [])
+    except:
+        st.error("خطأ في جلب البيانات من TradingView")
+        return pd.DataFrame()
 
     rows = []
     for d in data:
@@ -54,42 +55,42 @@ def fetch_ksa():
             rows.append({
                 "Symbol": d["s"],
                 "Company": d["d"][1],
-                "Price": float(d["d"][2]),
-                "Change %": float(d["d"][3]),
-                "Relative Volume": float(d["d"][4]) if d["d"][4] else 0,
-                "Volume": float(d["d"][5]) if d["d"][5] else 0
+                "Price": float(d["d"][2]) if d["d"][2] else 0.0,
+                "Change %": float(d["d"][3]) if d["d"][3] else 0.0,
+                "Relative Volume": float(d["d"][4]) if d["d"][4] else 0.0,
+                "Volume": float(d["d"][5]) if d["d"][5] else 0.0
             })
         except:
-            pass
-
+            continue
     return pd.DataFrame(rows)
 
-# ================= HISTORICAL DATA =================
-def fetch_history(symbol, period="200d"):
-    try:
-        s = symbol.replace("TADAWUL:", "") + ".SR"
-        hist = yf.Ticker(s).history(period=period)
-        if hist.empty:
-            return None
-        return hist
-    except:
-        return None
-
 # ================= INDICATORS =================
-def compute_indicators(hist):
-    df = hist.copy()
-    df["EMA20"] = EMAIndicator(df["Close"], 20).ema_indicator()
-    df["EMA50"] = EMAIndicator(df["Close"], 50).ema_indicator()
-    df["EMA200"] = EMAIndicator(df["Close"], 200).ema_indicator()
-    df["RSI"] = RSIIndicator(df["Close"], 14).rsi()
-    macd = MACD(df["Close"])
+def compute_indicators(df):
+    df = df.copy()
+    df["EMA20"] = EMAIndicator(df["Price"], 20).ema_indicator()
+    df["EMA50"] = EMAIndicator(df["Price"], 50).ema_indicator()
+    df["EMA200"] = EMAIndicator(df["Price"], 200).ema_indicator()
+    df["RSI"] = RSIIndicator(df["Price"], 14).rsi()
+    macd = MACD(df["Price"])
     df["MACD"] = macd.macd_diff()
-    df["Relative Volume"] = df["Volume"] / df["Volume"].rolling(20).mean()
     df.fillna(method="bfill", inplace=True)
     return df
 
+# ================= LAST 10 DAYS =================
+def last_10_days(symbol):
+    try:
+        s = symbol.replace("TADAWUL:", "") + ".SR"
+        hist = yf.Ticker(s).history(period="15d")
+        if len(hist) < 10:
+            return None
+        last10 = hist.tail(10)
+        last10["Change %"] = last10["Close"].pct_change() * 100
+        return last10
+    except:
+        return None
+
 # ================= NEXT DAY SCORE =================
-def next_day_score(row, hist_last10=None):
+def next_day_score(row, last10=None):
     score = 0
     reasons = []
 
@@ -110,12 +111,12 @@ def next_day_score(row, hist_last10=None):
         score += 15; reasons.append("سيولة مرتفعة")
 
     # Price Action
-    if row["Close"] > row["EMA20"]:
+    if row["Price"] > row["EMA20"]:
         score += 10; reasons.append("إغلاق فوق EMA20")
 
     # Last 10 days
-    if hist_last10 is not None:
-        green = (hist_last10["Close"].pct_change()*100 > 0).sum()
+    if last10 is not None:
+        green = (last10["Change %"] > 0).sum()
         if green >= 6:
             score += 10; reasons.append("تجميع 10 أيام")
 
@@ -128,24 +129,11 @@ def next_day_score(row, hist_last10=None):
 # ================= UI =================
 st.title("🧠 AI High Gain Dashboard – KSA")
 
-# جلب بيانات السوق
 df = fetch_ksa()
-df["NextDayScore"] = 0
-df["سبب الترشيح"] = ""
-df["نوع التداول"] = ""
+if df.empty:
+    st.stop()
+df = compute_indicators(df)
 
-# حساب المؤشرات لكل سهم
-for idx, row in df.iterrows():
-    hist = fetch_history(row["Symbol"])
-    if hist is not None and not hist.empty:
-        ind = compute_indicators(hist)
-        last_row = ind.iloc[-1]
-        score, reason = next_day_score(last_row, ind.tail(10))
-        df.at[idx,"NextDayScore"] = score
-        df.at[idx,"سبب الترشيح"] = reason
-        df.at[idx,"نوع التداول"] = "مضاربي" if score>=40 else "استثماري"
-
-# التابات
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📈 +5% اليوم",
     "🔥 أفضل 20 سهم للغد",
@@ -153,33 +141,46 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📊 السوق كامل",
     "⚡ فرص +2% غدًا",
     "🧠 Score ذكي",
-    "💹 فرص متقدمة"
+    "💹 فرص فنية متقدمة"
 ])
 
 # ---------- TAB 1 ----------
 with tab1:
-    high_gain = df[df["Change %"] >= 5].copy()
+    high_gain = df[df["Change %"] >= 5]
     st.dataframe(high_gain, use_container_width=True)
     if st.button("💾 حفظ +5% اليوم"):
         safe_save(HIGH_GAIN_FILE, high_gain)
 
 # ---------- TAB 2 ----------
 with tab2:
+    scores = []
+    reasons = []
+    for _, r in df.iterrows():
+        l10 = last_10_days(r["Symbol"])
+        s, reason = next_day_score(r, l10)
+        scores.append(s)
+        reasons.append(reason)
+    df["NextDayScore"] = scores
+    df["سبب الترشيح"] = reasons
     top20 = df.sort_values("NextDayScore", ascending=False).head(20)
-    st.subheader("أفضل 20 سهم للغد (+5%)")
-    st.dataframe(
-        top20[["Symbol","Company","Price","NextDayScore","RSI","MACD","Relative Volume","سبب الترشيح","نوع التداول"]],
-        use_container_width=True
-    )
+    st.subheader("أفضل 20 سهم مرشح للغد (+5%)")
+    st.dataframe(top20[[
+        "Symbol","Company","Price","NextDayScore",
+        "RSI","MACD","Relative Volume","سبب الترشيح"
+    ]], use_container_width=True)
 
 # ---------- TAB 3 ----------
 with tab3:
     for _, r in high_gain.iterrows():
         st.markdown(f"### {r['Symbol']} – {r['Company']}")
-        hist = fetch_history(r["Symbol"])
-        if hist is not None:
-            view = hist.tail(10)[["Close","Volume"]].copy()
-            view["Change %"] = view["Close"].pct_change()*100
+        l10 = last_10_days(r["Symbol"])
+        if l10 is not None:
+            view = l10[["Close","Volume"]].copy()
+            view["Change %"] = l10["Close"].pct_change() * 100
+            view["EMA20"] = EMAIndicator(view["Close"], 20).ema_indicator()
+            view["EMA50"] = EMAIndicator(view["Close"], 50).ema_indicator()
+            view["EMA200"] = EMAIndicator(view["Close"], 200).ema_indicator()
+            view["RSI"] = RSIIndicator(view["Close"],14).rsi()
             st.dataframe(view, use_container_width=True)
 
 # ---------- TAB 4 ----------
@@ -188,8 +189,7 @@ with tab4:
 
 # ---------- TAB 5 ----------
 with tab5:
-    potential = df[df["Change %"] >= 2]
-    st.dataframe(potential, use_container_width=True)
+    st.dataframe(df[df["Change %"] >= 2], use_container_width=True)
 
 # ---------- TAB 6 ----------
 with tab6:
@@ -198,19 +198,22 @@ with tab6:
 
 # ---------- TAB 7 ----------
 with tab7:
-    adv = df[
-        (df["MACD"] > 0) &
-        (df["Relative Volume"] > 1.3) &
-        (df["Close"] > df["EMA20"]) 
+    advanced = df[
+        (df["MACD"]>0) &
+        (df["Relative Volume"]>1.3) &
+        (df["Price"]>df["EMA20"])
     ].copy()
     adv_scores = []
     adv_reasons = []
-    for idx, row in adv.iterrows():
-        hist = fetch_history(row["Symbol"])
-        score, reason = next_day_score(row, hist.tail(10) if hist is not None else None)
-        adv_scores.append(score)
+    for _, r in advanced.iterrows():
+        l10 = last_10_days(r["Symbol"])
+        s, reason = next_day_score(r, l10)
+        adv_scores.append(s)
         adv_reasons.append(reason)
-    adv["NextDayScore"] = adv_scores
-    adv["سبب الترشيح"] = adv_reasons
-    st.subheader("فرص متقدمة – MACD إيجابي + سيولة + إغلاق أعلى EMA20 + تجميع 10 شموع")
-    st.dataframe(adv[["Symbol","Company","Price","NextDayScore","RSI","MACD","Relative Volume","Volume","سبب الترشيح","نوع التداول"]], use_container_width=True)
+    advanced["NextDayScore"] = adv_scores
+    advanced["سبب الترشيح"] = adv_reasons
+    st.subheader("فرص فنية متقدمة")
+    st.dataframe(advanced[[
+        "Symbol","Company","Price","NextDayScore","RSI","MACD",
+        "Relative Volume","سبب الترشيح"
+    ]], use_container_width=True)
