@@ -27,7 +27,7 @@ if symbols_df.empty:
     st.stop()
 
 # ================= FETCH DATA =================
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)  # تحديث مرة كل 24 ساعة
 def fetch_data(symbol):
     try:
         df = yf.download(symbol, period="9mo", interval="1d", progress=False)
@@ -86,6 +86,9 @@ def analyze_stock(symbol, company):
     t1 = round(entry * 1.05, 2)
     t2 = round(entry * 1.10, 2)
 
+    # تخزين History كـ dict لتقليل حجم DataFrame
+    history = df.tail(10)[["Close","Volume","Change %"]].to_dict(orient="records")
+
     return {
         "Symbol": symbol,
         "Company": company,
@@ -103,22 +106,34 @@ def analyze_stock(symbol, company):
         "Stop": stop,
         "Target 1": t1,
         "Target 2": t2,
-        "History": df.tail(10)
+        "History": history
     }
 
 # ================= RUN =================
 results = []
-with st.spinner("🔍 تحليل جميع الأسهم..."):
-    for _, r in symbols_df.iterrows():
+errors = []
+
+st.title("🧠 AI KSA Trading Dashboard")
+progress_bar = st.progress(0)
+total = len(symbols_df)
+
+for idx, r in symbols_df.iterrows():
+    try:
         res = analyze_stock(r["Symbol"], r.get("Company", ""))
         if res:
             results.append(res)
+        else:
+            errors.append(r["Symbol"])
+    except Exception as e:
+        errors.append(f"{r['Symbol']} → {e}")
+    progress_bar.progress((idx+1)/total)
+
+if errors:
+    st.warning(f"❌ بعض الأسهم لم تُحلل: {errors}")
 
 df_all = pd.DataFrame(results)
 
 # ================= UI =================
-st.title("🧠 AI KSA Trading Dashboard")
-
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📊 السوق كامل",
     "📈 +5% اليوم",
@@ -131,7 +146,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
 
 # ---------- TAB 1 ----------
 with tab1:
-    st.dataframe(df_all.drop(columns=["History"]), use_container_width=True)
+    st.dataframe(df_all.drop(columns=["History"], errors="ignore"), use_container_width=True)
 
 # ---------- TAB 2 ----------
 with tab2:
@@ -156,8 +171,9 @@ with tab4:
 with tab5:
     for _, r in df_all[df_all["Score"] >= 70].iterrows():
         st.markdown(f"### {r['Symbol']} – {r['Company']}")
-        hist = r["History"][["Close","Volume","Change %"]]
-        st.dataframe(hist, use_container_width=True)
+        hist = pd.DataFrame(r.get("History", []))
+        if not hist.empty:
+            st.dataframe(hist, use_container_width=True)
 
 # ---------- TAB 6 ----------
 with tab6:
