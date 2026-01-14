@@ -19,20 +19,31 @@ symbols = symbols_df["Symbol"].dropna().unique().tolist()
 @st.cache_data(ttl=3600)
 def fetch_data(symbol):
     df = yf.download(symbol, period="6mo", interval="1d", progress=False)
-    if df.empty or len(df) < 50:
+
+    if df.empty or len(df) < 60:
         return None
 
-    df["EMA20"] = EMAIndicator(df["Close"], 20).ema_indicator()
-    df["EMA50"] = EMAIndicator(df["Close"], 50).ema_indicator()
-    df["EMA200"] = EMAIndicator(df["Close"], 200).ema_indicator()
+    close = df["Close"]
 
-    df["RSI"] = RSIIndicator(df["Close"], 14).rsi()
-    df["MACD"] = MACD(df["Close"]).macd_diff()
+    if isinstance(close, pd.DataFrame):
+        close = close.iloc[:, 0]
+
+    close = close.astype(float)
+
+    df["EMA20"] = EMAIndicator(close, 20).ema_indicator()
+    df["EMA50"] = EMAIndicator(close, 50).ema_indicator()
+    df["EMA200"] = EMAIndicator(close, 200).ema_indicator()
+
+    df["RSI"] = RSIIndicator(close, 14).rsi()
+
+    macd = MACD(close)
+    df["MACD"] = macd.macd_diff()
 
     df["AvgVolume10"] = df["Volume"].rolling(10).mean()
-    df.dropna(inplace=True)
 
+    df.dropna(inplace=True)
     return df
+
 
 # ================= ANALYSIS =================
 rows = []
