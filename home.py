@@ -1,3 +1,5 @@
+
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -6,27 +8,29 @@ import os
 
 # ================= CONFIG =================
 st.set_page_config("AI KSA Trading Dashboard", layout="wide")
-TV_FILE = "tadawul_symbols.csv"  # ملف بيانات TradingView
+SYMBOLS_FILE = "tadawul_symbols.csv"  # الملف يحتوي فقط على Symbol, Yahoo, Company
 
-# ================= LOAD TRADINGVIEW DATA =================
+# ================= LOAD SYMBOLS =================
 @st.cache_data
-def load_tradingview():
-    if not os.path.exists(TV_FILE):
+def load_symbols():
+    if not os.path.exists(SYMBOLS_FILE):
         return pd.DataFrame()
-    # ملف بسيط بدون Header
-    df = pd.read_csv(TV_FILE, names=["Symbol", "Company", "TV_Close"])
+    df = pd.read_csv(SYMBOLS_FILE)
+    required = {"Symbol", "Yahoo", "Company"}
+    if not required.issubset(df.columns):
+        return pd.DataFrame()
     return df
 
-tv_df = load_tradingview()
-if tv_df.empty:
-    st.error("❌ ملف tradingview_symbols.csv غير موجود أو فارغ")
+symbols_df = load_symbols()
+if symbols_df.empty:
+    st.error("❌ ملف tadawul_symbols.csv غير صحيح أو لا يحتوي على الأعمدة المطلوبة")
     st.stop()
 
 # ================= FETCH YAHOO DATA =================
 @st.cache_data(ttl=3600)
-def fetch_yahoo_full(symbol):
+def fetch_yahoo_full(yahoo_symbol):
     try:
-        df = yf.download(symbol, period="6mo", interval="1d", progress=False)
+        df = yf.download(yahoo_symbol, period="6mo", interval="1d", progress=False)
         if df.empty or len(df) < 50:
             raise Exception
 
@@ -71,14 +75,14 @@ def fetch_yahoo_full(symbol):
 
 # ================= BUILD DATA =================
 rows = []
-with st.spinner("🔄 جلب بيانات السوق من Yahoo وTradingView..."):
-    for _, r in tv_df.iterrows():
-        yahoo_data = fetch_yahoo_full(r["Symbol"])
+with st.spinner("🔄 جلب بيانات Yahoo لكل سهم..."):
+    for _, r in symbols_df.iterrows():
+        yahoo_data = fetch_yahoo_full(r["Yahoo"])
         rows.append({
             "Symbol": r["Symbol"],
-            "Company": r["Company"],      # من TradingView
-            "TV_Close": r["TV_Close"],    # من TradingView
-            **yahoo_data                  # بيانات Yahoo
+            "Yahoo": r["Yahoo"],
+            "Company": r["Company"],
+            **yahoo_data
         })
 
 df_all = pd.DataFrame(rows)
@@ -174,3 +178,4 @@ with tabs[3]:
 
 with tabs[4]:
     st.dataframe(df_all[df_all["Signal"] == "WATCH 🟡"], use_container_width=True)
+
