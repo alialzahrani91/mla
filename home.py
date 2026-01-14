@@ -23,7 +23,7 @@ def load_symbols():
 
 symbols_df = load_symbols()
 if symbols_df.empty:
-    st.error("❌ ملف symbols غير موجود أو العمود Symbol مفقود")
+    st.error("❌ ملف tadawul_symbols.csv غير موجود أو العمود Symbol مفقود")
     st.stop()
 
 # ================= FETCH DATA =================
@@ -48,6 +48,7 @@ def fetch_data(symbol):
         df["MACD"] = macd.macd_diff()
 
         df["VolumeAvg20"] = df["Volume"].rolling(20).mean()
+        df["Change %"] = df["Close"].pct_change() * 100
 
         df.dropna(inplace=True)
         if len(df) < 5:
@@ -61,7 +62,7 @@ def fetch_data(symbol):
 # ================= ANALYSIS =================
 def analyze_stock(symbol, company):
     df = fetch_data(symbol)
-    if df is None or df.empty or len(df) < 2:
+    if df is None or df.empty:
         return None
 
     last = df.iloc[-1]
@@ -69,55 +70,45 @@ def analyze_stock(symbol, company):
     score = 0
     reasons = []
 
-    # Trend
     if last["EMA20"] > last["EMA50"]:
-        score += 20
-        reasons.append("EMA20 > EMA50")
+        score += 20; reasons.append("EMA20 > EMA50")
     if last["EMA50"] > last["EMA200"]:
-        score += 20
-        reasons.append("EMA50 > EMA200")
-
-    # Momentum
+        score += 20; reasons.append("EMA50 > EMA200")
     if 50 <= last["RSI"] <= 68:
-        score += 15
-        reasons.append("RSI صحي")
-
+        score += 15; reasons.append("RSI صحي")
     if last["MACD"] > 0:
-        score += 15
-        reasons.append("MACD إيجابي")
-
-    # Volume
+        score += 15; reasons.append("MACD إيجابي")
     if last["Volume"] > last["VolumeAvg20"] * 1.3:
-        score += 20
-        reasons.append("سيولة مفاجئة")
+        score += 20; reasons.append("سيولة مفاجئة")
 
-    # Entry / SL / Targets
     entry = round(last["Close"], 2)
     stop = round(entry * 0.96, 2)
-    target1 = round(entry * 1.05, 2)
-    target2 = round(entry * 1.10, 2)
+    t1 = round(entry * 1.05, 2)
+    t2 = round(entry * 1.10, 2)
 
     return {
         "Symbol": symbol,
         "Company": company,
         "Close": round(last["Close"], 2),
+        "Change %": round(last["Change %"], 2),
         "EMA20": round(last["EMA20"], 2),
         "EMA50": round(last["EMA50"], 2),
         "EMA200": round(last["EMA200"], 2),
         "RSI": round(last["RSI"], 2),
         "MACD": round(last["MACD"], 4),
+        "Volume": int(last["Volume"]),
         "Score": score,
         "Reasons": " + ".join(reasons),
         "Entry": entry,
         "Stop": stop,
-        "Target 1": target1,
-        "Target 2": target2
+        "Target 1": t1,
+        "Target 2": t2,
+        "History": df.tail(10)
     }
 
-# ================= RUN ANALYSIS =================
+# ================= RUN =================
 results = []
-
-with st.spinner("🔍 تحليل الأسهم..."):
+with st.spinner("🔍 تحليل جميع الأسهم..."):
     for _, r in symbols_df.iterrows():
         res = analyze_stock(r["Symbol"], r.get("Company", ""))
         if res:
@@ -126,40 +117,53 @@ with st.spinner("🔍 تحليل الأسهم..."):
 df_all = pd.DataFrame(results)
 
 # ================= UI =================
-st.title("📈 AI KSA Trading Dashboard")
+st.title("🧠 AI KSA Trading Dashboard")
 
-tab1, tab2, tab3 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📊 السوق كامل",
-    "🔥 أفضل فرص قوية",
-    "🎯 فرصة قوية (دخول/وقف/أهداف)"
+    "📈 +5% اليوم",
+    "🔥 أفضل 20 للغد",
+    "🎯 فرص قوية",
+    "📉 تحليل 10 إغلاقات",
+    "⚡ فرص +2%",
+    "🧠 ملخص السوق"
 ])
 
 # ---------- TAB 1 ----------
 with tab1:
-    st.dataframe(df_all, use_container_width=True)
+    st.dataframe(df_all.drop(columns=["History"]), use_container_width=True)
 
 # ---------- TAB 2 ----------
 with tab2:
-    top = df_all.sort_values("Score", ascending=False).head(20)
-    st.subheader("أفضل 20 سهم محتمل للغد")
+    st.dataframe(df_all[df_all["Change %"] >= 5], use_container_width=True)
+
+# ---------- TAB 3 ----------
+with tab3:
+    top20 = df_all.sort_values("Score", ascending=False).head(20)
+    st.dataframe(top20, use_container_width=True)
+
+# ---------- TAB 4 ----------
+with tab4:
+    strong = df_all[df_all["Score"] >= 70].sort_values("Score", ascending=False)
     st.dataframe(
-        top[[
-            "Symbol","Company","Close",
-            "EMA20","EMA50","EMA200",
-            "RSI","MACD","Score","Reasons"
+        strong[[
+            "Symbol","Company","Entry","Stop","Target 1","Target 2","Score","Reasons"
         ]],
         use_container_width=True
     )
 
-# ---------- TAB 3 ----------
-with tab3:
-    strong = df_all[df_all["Score"] >= 70].sort_values("Score", ascending=False)
-    st.subheader("فرص قوية مكتملة فنياً")
-    st.dataframe(
-        strong[[
-            "Symbol","Company",
-            "Entry","Stop","Target 1","Target 2",
-            "Score","Reasons"
-        ]],
-        use_container_width=True
-    )
+# ---------- TAB 5 ----------
+with tab5:
+    for _, r in df_all[df_all["Score"] >= 70].iterrows():
+        st.markdown(f"### {r['Symbol']} – {r['Company']}")
+        hist = r["History"][["Close","Volume","Change %"]]
+        st.dataframe(hist, use_container_width=True)
+
+# ---------- TAB 6 ----------
+with tab6:
+    st.dataframe(df_all[df_all["Change %"] >= 2], use_container_width=True)
+
+# ---------- TAB 7 ----------
+with tab7:
+    st.metric("عدد الأسهم", len(df_all))
+    st.metric("أعلى Score", int(df_all["Score"].max()))
