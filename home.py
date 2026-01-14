@@ -1,17 +1,14 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import requests
-import os
-from datetime import datetime
 import yfinance as yf
-from ta.momentum import RSIIndicator
+from datetime import datetime
 from ta.trend import EMAIndicator, MACD
+from ta.momentum import RSIIndicator
+import os
 
 # ================= CONFIG =================
 st.set_page_config("AI High Gain Dashboard – KSA", layout="wide")
-HEADERS = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
-
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 HIGH_GAIN_FILE = f"{DATA_DIR}/high_gain_today.csv"
@@ -27,55 +24,20 @@ def safe_save(file, df):
     df.to_csv(file, index=False)
     st.success(f"تم الحفظ في {file}")
 
-# ================= TRADINGVIEW =================
-@st.cache_data(ttl=600)
-def fetch_ksa():
-    url = "https://scanner.tradingview.com/ksa/scan"
-    payload = {
-        "filter": [{"left": "type", "operation": "equal", "right": "stock"}],
-        "columns": ["name", "description", "close", "change", "relative_volume_10d_calc", "volume"],
-        "sort": {"sortBy": "change", "sortOrder": "desc"},
-        "range": [0, 400]
-    }
-    try:
-        r = requests.post(url, json=payload, headers=HEADERS, timeout=20)
-        r.raise_for_status()
-        data = r.json().get("data", [])
-    except Exception as e:
-        st.error(f"⚠️ خطأ في جلب البيانات: {e}")
-        return pd.DataFrame()
-
-    rows = []
-    for d in data:
-        try:
-            rows.append({
-                "Symbol": d["s"],
-                "Company": d["d"][1],
-                "Price": float(d["d"][2]),
-                "Change %": float(d["d"][3]),
-                "Relative Volume": float(d["d"][4]) if d["d"][4] else 0,
-                "Volume": float(d["d"][5]) if d["d"][5] else 0
-            })
-        except:
-            continue
-    return pd.DataFrame(rows)
-
-# ================= INDICATORS =================
 def compute_indicators(df):
     df = df.copy()
     df["EMA20"] = EMAIndicator(df["Price"], 20).ema_indicator()
     df["EMA50"] = EMAIndicator(df["Price"], 50).ema_indicator()
     df["EMA200"] = EMAIndicator(df["Price"], 200).ema_indicator()
     df["RSI"] = RSIIndicator(df["Price"], 14).rsi()
-    df["MACD"] = MACD(df["Price"]).macd_diff()
+    macd = MACD(df["Price"])
+    df["MACD"] = macd.macd_diff()
     df.fillna(method="bfill", inplace=True)
     return df
 
-# ================= LAST 10 DAYS =================
 def last_10_days(symbol):
     try:
-        s = symbol.replace("TADAWUL:", "") + ".SR"
-        hist = yf.Ticker(s).history(period="15d")
+        hist = yf.Ticker(symbol).history(period="15d")
         if len(hist) < 10:
             return None
         last10 = hist.tail(10)
@@ -84,60 +46,71 @@ def last_10_days(symbol):
     except:
         return None
 
-# ================= NEXT DAY SCORE =================
 def next_day_score(row, last10=None):
     score = 0
     reasons = []
 
-    # Trend
     if row["EMA20"] > row["EMA50"]:
         score += 15; reasons.append("EMA20 > EMA50")
     if row["EMA50"] > row["EMA200"]:
         score += 15; reasons.append("EMA50 > EMA200")
-
-    # Momentum
     if 50 <= row["RSI"] <= 68:
         score += 15; reasons.append("RSI صحي")
     if row["MACD"] > 0:
         score += 10; reasons.append("MACD إيجابي")
-
-    # Volume
-    if row["Relative Volume"] > 1.3:
-        score += 15; reasons.append("سيولة مرتفعة")
-
-    # Price Action
     if row["Price"] > row["EMA20"]:
         score += 10; reasons.append("إغلاق فوق EMA20")
+    if row["Relative Volume"] > 1.3:
+        score += 15; reasons.append("سيولة مرتفعة")
 
     if last10 is not None:
         green = (last10["Change %"] > 0).sum()
         if green >= 6:
             score += 10; reasons.append("تجميع 10 أيام")
 
-    # Risk
     if row["RSI"] > 72:
         score -= 20; reasons.append("تشبع شراء")
 
-    return max(score, 0), " + ".join(reasons)
+    return max(score,0), " + ".join(reasons)
+
+# ================= LOAD SYMBOLS =================
+# CSV يحتوي عمود Symbol بصيغة Yahoo (مثال: 4327.SR)
+symbols_file = "tadawul_symbols.csv"
+symbols_df = pd.read_csv(symbols_file)
+symbols = symbols_df["Symbol"].tolist()
+
+# ================= FETCH DATA =================
+rows = []
+for s in symbols:
+    try:
+        df_hist = yf.Ticker(s).history(period="5d")
+        price = df_hist["Close"].iloc[-1]
+        volume = df_hist["Volume"].iloc[-1]
+        rel_vol = volume / df_hist["Volume"].rolling(10).mean().iloc[-1]
+        rows.append({
+            "Symbol": s,
+            "Company": s,  # يمكن تعديل لو عندك أسماء الشركات
+            "Price": price,
+            "Relative Volume": rel_vol,
+            "Volume": volume,
+            "Change %": (price - df_hist["Close"].iloc[-2]) / df_hist["Close"].iloc[-2] * 100
+        })
+    except:
+        continue
+
+df = pd.DataFrame(rows)
+df = compute_indicators(df)
 
 # ================= UI =================
 st.title("🧠 AI High Gain Dashboard – KSA")
-
-df = fetch_ksa()
-if df.empty:
-    st.stop()
-
-df = compute_indicators(df)
-
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📈 +5% اليوم",
     "🔥 أفضل 20 سهم للغد",
     "📉 تحليل 10 إغلاقات",
     "📊 السوق كامل",
     "⚡ فرص +2% غدًا",
     "🧠 Score ذكي",
-    "💡 فرص MACD + سيولة + EMA20 + 10 شموع",
-    "🚀 فرص قوية مع أهداف"
+    "💎 فرص قوية (دخول/وقف/هدف)"
 ])
 
 # ---------- TAB 1 ----------
@@ -156,23 +129,20 @@ with tab2:
         s, reason = next_day_score(r, l10)
         scores.append(s)
         reasons.append(reason)
-
     df["NextDayScore"] = scores
     df["سبب الترشيح"] = reasons
     top20 = df.sort_values("NextDayScore", ascending=False).head(20)
-    st.subheader("أفضل 20 سهم مرشح للغد (+5%)")
-    st.dataframe(top20[[
-        "Symbol","Company","Price","NextDayScore","RSI","MACD","Relative Volume","سبب الترشيح"
-    ]], use_container_width=True)
+    st.dataframe(top20[["Symbol","Company","Price","NextDayScore","RSI","MACD","Relative Volume","سبب الترشيح"]], use_container_width=True)
 
 # ---------- TAB 3 ----------
 with tab3:
     for _, r in high_gain.iterrows():
-        st.markdown(f"### {r['Symbol']} – {r['Company']}")
+        st.markdown(f"### {r['Symbol']}")
         l10 = last_10_days(r["Symbol"])
         if l10 is not None:
             view = l10[["Close"]].copy()
             view["Change %"] = l10["Close"].pct_change() * 100
+            view["Volume"] = l10["Volume"]
             st.dataframe(view, use_container_width=True)
 
 # ---------- TAB 4 ----------
@@ -190,37 +160,8 @@ with tab6:
 
 # ---------- TAB 7 ----------
 with tab7:
-    strong_signals = df[
-        (df["MACD"] > 0) &
-        (df["Relative Volume"] > 1.3) &
-        (df["Price"] > df["EMA20"])
-    ].copy()
-    strong_scores = []
-    strong_reasons = []
-    for _, r in strong_signals.iterrows():
-        l10 = last_10_days(r["Symbol"])
-        s, reason = next_day_score(r, l10)
-        strong_scores.append(s)
-        strong_reasons.append(reason)
-    strong_signals["NextDayScore"] = strong_scores
-    strong_signals["سبب الترشيح"] = strong_reasons
-    st.subheader("فرص MACD + سيولة + EMA20 + 10 شموع")
-    st.dataframe(strong_signals.head(20)[[
-        "Symbol","Company","Price","NextDayScore","RSI","MACD","Relative Volume","سبب الترشيح"
-    ]], use_container_width=True)
-
-# ---------- TAB 8 ----------
-with tab8:
-    strong_ops = df[
-        (df["MACD"] > 0) &
-        (df["Relative Volume"] > 1.3) &
-        (df["Price"] > df["EMA20"])
-    ].sort_values("NextDayScore", ascending=False).head(20)
-    strong_ops = strong_ops.copy()
-    strong_ops["سعر الدخول"] = strong_ops["Price"]
-    strong_ops["وقف الخسارة"] = strong_ops["EMA50"]
-    strong_ops["الهدف"] = strong_ops["Price"] * 1.05
-    st.subheader("فرص قوية للغد مع سعر الدخول والوقف والأهداف")
-    st.dataframe(strong_ops[[
-        "Symbol","Company","سعر الدخول","وقف الخسارة","الهدف","NextDayScore","RSI","MACD","Relative Volume","سبب الترشيح"
-    ]], use_container_width=True)
+    top_scores = df[df["NextDayScore"] >= 50].head(20).copy()
+    top_scores["دخول"] = top_scores["Price"]  # سعر الدخول الحالي
+    top_scores["وقف"] = top_scores["EMA20"] - (top_scores["Price"]*0.02)  # مثال وقف 2%
+    top_scores["هدف"] = top_scores["Price"] + (top_scores["Price"]*0.05)  # هدف 5%
+    st.dataframe(top_scores[["Symbol","Company","Price","NextDayScore","دخول","وقف","هدف","سبب الترشيح"]], use_container_width=True)
