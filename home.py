@@ -27,7 +27,7 @@ if symbols_df.empty:
     st.stop()
 
 # ================= FETCH DATA =================
-@st.cache_data(ttl=86400)
+
 def fetch_data(symbol):
     try:
         df = yf.download(symbol, period="9mo", interval="1d", progress=False)
@@ -36,12 +36,12 @@ def fetch_data(symbol):
 
         close = df["Close"]
 
-        if close.ndim != 1 or len(close) < 200:
+        if close.ndim != 1 or len(close) < 40:
             return None
 
-        df["EMA20"] = EMAIndicator(close, 20).ema_indicator()
-        df["EMA50"] = EMAIndicator(close, 50).ema_indicator()
-        df["EMA200"] = EMAIndicator(close, 200).ema_indicator()
+        df["EMA20"] = EMAIndicator(close, 7).ema_indicator()
+        df["EMA50"] = EMAIndicator(close, 21).ema_indicator()
+        df["EMA200"] = EMAIndicator(close, 40).ema_indicator()
         df["RSI"] = RSIIndicator(close, 14).rsi()
 
         macd = MACD(close)
