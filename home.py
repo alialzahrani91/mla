@@ -91,49 +91,78 @@ with st.spinner("🔄 جلب بيانات السوق..."):
 
 df_all = pd.DataFrame(rows)
 
-# ================= SCORE ENGINE =================
-def score_stock(row):
+# ================= SCORE ENGINE DYNAMIC =================
+st.sidebar.header("⚙️ إعدادات Scoring")
+
+# إعدادات ديناميكية من الشريط الجانبي
+change_pct_threshold = st.sidebar.number_input("Change % minimum", value=2.0, step=0.1)
+volume_multiplier = st.sidebar.number_input("Volume > Avg20 multiplier", value=1.0, step=0.1)
+rsi_min = st.sidebar.number_input("RSI Min", value=45)
+rsi_max = st.sidebar.number_input("RSI Max", value=68)
+volatility_max = st.sidebar.number_input("Max Volatility %", value=2.5)
+
+# تأكد أن الأعمدة رقمية لتجنب الأخطاء
+numeric_cols = ["Change %", "Volume", "VolumeAvg20", "Close", "EMA20", "EMA50", "RSI", "Volatility"]
+for col in numeric_cols:
+    if col in df_all.columns:
+        df_all[col] = pd.to_numeric(df_all[col], errors="coerce")
+
+def score_stock_dynamic(row):
     score = 0
     reasons = []
 
-    if pd.notna(row["Change %"]) and row["Change %"] >= 2:
-        score += 15; reasons.append("+2%")
+    change = row.get("Change %", np.nan)
+    volume = row.get("Volume", np.nan)
+    volume_avg = row.get("VolumeAvg20", np.nan)
+    close = row.get("Close", np.nan)
+    ema20 = row.get("EMA20", np.nan)
+    ema50 = row.get("EMA50", np.nan)
+    rsi = row.get("RSI", np.nan)
+    volatility = row.get("Volatility", np.nan)
 
-    if pd.notna(row["Volume"]) and pd.notna(row["VolumeAvg20"]) and row["Volume"] > row["VolumeAvg20"]:
-        score += 25; reasons.append("سيولة")
+    if pd.notna(change) and change >= change_pct_threshold:
+        score += 15
+        reasons.append(f"+{change_pct_threshold}%")
 
-    if pd.notna(row["Close"]) and pd.notna(row["EMA20"]) and row["Close"] > row["EMA20"]:
-        score += 15; reasons.append("فوق EMA20")
+    if pd.notna(volume) and pd.notna(volume_avg) and volume > (volume_avg * volume_multiplier):
+        score += 25
+        reasons.append("سيولة")
 
-    if pd.notna(row["EMA20"]) and pd.notna(row["EMA50"]) and row["EMA20"] > row["EMA50"]:
-        score += 15; reasons.append("اتجاه صاعد")
+    if pd.notna(close) and pd.notna(ema20) and close > ema20:
+        score += 15
+        reasons.append("فوق EMA20")
 
-    if pd.notna(row["RSI"]) and 45 <= row["RSI"] <= 68:
-        score += 15; reasons.append("RSI صحي")
+    if pd.notna(ema20) and pd.notna(ema50) and ema20 > ema50:
+        score += 15
+        reasons.append("اتجاه صاعد")
 
-    if pd.notna(row["Volatility"]) and row["Volatility"] < 2.5:
-        score += 15; reasons.append("تذبذب منخفض")
+    if pd.notna(rsi) and rsi_min <= rsi <= rsi_max:
+        score += 15
+        reasons.append("RSI صحي")
+
+    if pd.notna(volatility) and volatility < volatility_max:
+        score += 15
+        reasons.append("تذبذب منخفض")
 
     return score, " + ".join(reasons)
 
-scores = df_all.apply(score_stock, axis=1)
+# تطبيق الدالة
+scores = df_all.apply(score_stock_dynamic, axis=1)
 df_all["Score"] = scores.apply(lambda x: x[0])
 df_all["Reasons"] = scores.apply(lambda x: x[1])
 
-# ================= SIGNALS =================
-def trade_signal(row):
-    if row["Score"] >= 70 and pd.notna(row["Change %"]) and row["Change %"] >= 2:
+# ================= SIGNALS DYNAMIC =================
+def trade_signal_dynamic(row):
+    if row["Score"] >= 70 and pd.notna(row["Change %"]) and row["Change %"] >= change_pct_threshold:
         return "BUY 🟢"
     elif row["Score"] >= 55:
         return "WATCH 🟡"
     else:
         return "IGNORE 🔴"
 
-df_all["Signal"] = df_all.apply(trade_signal, axis=1)
+df_all["Signal"] = df_all.apply(trade_signal_dynamic, axis=1)
 
-# ================= UI =================
-st.title("🧠 AI KSA Trading Dashboard")
-
+# ================= UI WITH TABS =================
 tabs = st.tabs([
     "📊 السوق كامل",
     "⚡ فرص +2%",
@@ -146,7 +175,7 @@ with tabs[0]:
     st.dataframe(df_all, use_container_width=True)
 
 with tabs[1]:
-    st.dataframe(df_all[df_all["Change %"] >= 2], use_container_width=True)
+    st.dataframe(df_all[df_all["Change %"] >= change_pct_threshold], use_container_width=True)
 
 with tabs[2]:
     st.dataframe(df_all[df_all["Change %"] >= 5], use_container_width=True)
