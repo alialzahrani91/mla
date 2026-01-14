@@ -36,6 +36,7 @@ def fetch_data(symbol):
 
         close = df["Close"]
 
+        # شرط طول البيانات >= 200 يوم
         if close.ndim != 1 or len(close) < 200:
             return None
 
@@ -63,7 +64,7 @@ def fetch_data(symbol):
 def analyze_stock(symbol, company):
     df = fetch_data(symbol)
     if df is None or df.empty:
-        return None
+        return None, "لا توجد بيانات كافية"
 
     last = df.iloc[-1]
 
@@ -86,7 +87,7 @@ def analyze_stock(symbol, company):
     t1 = round(entry * 1.05, 2)
     t2 = round(entry * 1.10, 2)
 
-    # تخزين History كـ dict لتقليل حجم DataFrame
+    # History كـ dict لتقليل حجم DataFrame
     history = df.tail(10)[["Close","Volume","Change %"]].to_dict(orient="records")
 
     return {
@@ -107,7 +108,7 @@ def analyze_stock(symbol, company):
         "Target 1": t1,
         "Target 2": t2,
         "History": history
-    }
+    }, None
 
 # ================= RUN =================
 results = []
@@ -119,17 +120,22 @@ total = len(symbols_df)
 
 for idx, r in symbols_df.iterrows():
     try:
-        res = analyze_stock(r["Symbol"], r.get("Company", ""))
+        res, error = analyze_stock(r["Symbol"], r.get("Company", ""))
         if res:
             results.append(res)
-        else:
-            errors.append(r["Symbol"])
+        elif error:
+            errors.append(f"{r['Symbol']} → {error}")
     except Exception as e:
         errors.append(f"{r['Symbol']} → {e}")
     progress_bar.progress((idx+1)/total)
 
 if errors:
-    st.warning(f"❌ بعض الأسهم لم تُحلل: {errors}")
+    st.warning("❌ بعض الأسهم لم تُحلل أو بها مشاكل:")
+    for e in errors:
+        st.write(e)
+
+if not results:
+    st.stop()  # لا بيانات صالحة
 
 df_all = pd.DataFrame(results)
 
@@ -150,36 +156,42 @@ with tab1:
 
 # ---------- TAB 2 ----------
 with tab2:
-    st.dataframe(df_all[df_all["Change %"] >= 5], use_container_width=True)
+    if "Change %" in df_all.columns:
+        st.dataframe(df_all[df_all["Change %"] >= 5], use_container_width=True)
 
 # ---------- TAB 3 ----------
 with tab3:
-    top20 = df_all.sort_values("Score", ascending=False).head(20)
-    st.dataframe(top20, use_container_width=True)
+    if "Score" in df_all.columns:
+        top20 = df_all.sort_values("Score", ascending=False).head(20)
+        st.dataframe(top20, use_container_width=True)
 
 # ---------- TAB 4 ----------
 with tab4:
-    strong = df_all[df_all["Score"] >= 70].sort_values("Score", ascending=False)
-    st.dataframe(
-        strong[[
-            "Symbol","Company","Entry","Stop","Target 1","Target 2","Score","Reasons"
-        ]],
-        use_container_width=True
-    )
+    if "Score" in df_all.columns:
+        strong = df_all[df_all["Score"] >= 70].sort_values("Score", ascending=False)
+        st.dataframe(
+            strong[[
+                "Symbol","Company","Entry","Stop","Target 1","Target 2","Score","Reasons"
+            ]],
+            use_container_width=True
+        )
 
 # ---------- TAB 5 ----------
 with tab5:
-    for _, r in df_all[df_all["Score"] >= 70].iterrows():
-        st.markdown(f"### {r['Symbol']} – {r['Company']}")
-        hist = pd.DataFrame(r.get("History", []))
-        if not hist.empty:
-            st.dataframe(hist, use_container_width=True)
+    if "Score" in df_all.columns:
+        for _, r in df_all[df_all["Score"] >= 70].iterrows():
+            st.markdown(f"### {r['Symbol']} – {r['Company']}")
+            hist = pd.DataFrame(r.get("History", []))
+            if not hist.empty:
+                st.dataframe(hist, use_container_width=True)
 
 # ---------- TAB 6 ----------
 with tab6:
-    st.dataframe(df_all[df_all["Change %"] >= 2], use_container_width=True)
+    if "Change %" in df_all.columns:
+        st.dataframe(df_all[df_all["Change %"] >= 2], use_container_width=True)
 
 # ---------- TAB 7 ----------
 with tab7:
     st.metric("عدد الأسهم", len(df_all))
-    st.metric("أعلى Score", int(df_all["Score"].max()))
+    if "Score" in df_all.columns:
+        st.metric("أعلى Score", int(df_all["Score"].max()))
